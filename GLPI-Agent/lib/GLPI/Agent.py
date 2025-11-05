@@ -16,6 +16,8 @@ from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
 import requests
 import platform
+import shutil
+import ctypes
 import re
 
 # Version information - exact match to Perl
@@ -265,8 +267,11 @@ class BaseTarget:
     def get_name(self) -> str:
         return getattr(self, 'url', getattr(self, 'path', self.id))
    
+    
     def planned_tasks(self, *tasks) -> List[str]:
-        return list(tasks)
+        if tasks:
+            self._planned_tasks = list(tasks)
+        return getattr(self, '_planned_tasks', [])
    
     def get_next_run_date(self) -> float:
         return self._next_run_date
@@ -389,6 +394,13 @@ class InventoryTask(BaseTask):
             'software': self._collect_software(),
             'network': self._collect_network()
         }
+
+        # Windows enriched sections (best-effort)
+        try:
+            if sys.platform.startswith('win'):
+                inventory_data['windows'] = self._collect_windows_enriched()
+        except Exception:
+            pass
        
         # Send to target
         if self.target.is_type('server'):
@@ -398,7 +410,7 @@ class InventoryTask(BaseTask):
    
     def _collect_hardware(self) -> Dict:
         """Basic hardware information"""
-        return {
+        info: Dict[str, Any] = {
             'system': platform.system(),
             'node': platform.node(),
             'release': platform.release(),
@@ -406,6 +418,101 @@ class InventoryTask(BaseTask):
             'machine': platform.machine(),
             'processor': platform.processor()
         }
+
+        # Memory (RAM)
+        try:
+            total_ram_bytes: Optional[int] = None
+            if sys.platform.startswith('win'):
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+                stat = MEMORYSTATUSEX()
+                stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                    total_ram_bytes = int(stat.ullTotalPhys)
+            if total_ram_bytes is None:
+                try:
+                    import psutil  # type: ignore
+                    total_ram_bytes = int(psutil.virtual_memory().total)
+                except Exception:
+                    total_ram_bytes = None
+            if total_ram_bytes is not None:
+                info['memory_bytes'] = total_ram_bytes
+                info['memory_total_gb'] = round(total_ram_bytes / (1024 ** 3), 2)
+        except Exception:
+            pass
+
+        # Storage (disks)
+        disks: List[Dict[str, Any]] = []
+        try:
+            used_psutil = False
+            try:
+                import psutil  # type: ignore
+                for part in psutil.disk_partitions(all=False):
+                    try:
+                        usage = psutil.disk_usage(part.mountpoint)
+                        disks.append({
+                            'device': part.device,
+                            'mountpoint': part.mountpoint,
+                            'fstype': part.fstype,
+                            'total_bytes': int(usage.total),
+                            'free_bytes': int(usage.free),
+                            'used_bytes': int(usage.used)
+                        })
+                    except Exception:
+                        continue
+                used_psutil = True
+            except Exception:
+                used_psutil = False
+
+            if not used_psutil:
+                # Fallback: on Windows, iterate likely drive letters
+                if sys.platform.startswith('win'):
+                    for letter in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+                        root = f"{letter}:\\"
+                        try:
+                            if os.path.exists(root):
+                                total, used, free = shutil.disk_usage(root)
+                                disks.append({
+                                    'device': letter + ':',
+                                    'mountpoint': root,
+                                    'fstype': None,
+                                    'total_bytes': int(total),
+                                    'free_bytes': int(free),
+                                    'used_bytes': int(used)
+                                })
+                        except Exception:
+                            continue
+                else:
+                    # POSIX fallback: root only
+                    try:
+                        total, used, free = shutil.disk_usage('/')
+                        disks.append({
+                            'device': None,
+                            'mountpoint': '/',
+                            'fstype': None,
+                            'total_bytes': int(total),
+                            'free_bytes': int(free),
+                            'used_bytes': int(used)
+                        })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        if disks:
+            info['disks'] = disks
+
+        return info
    
     def _collect_software(self) -> List[Dict]:
         """Basic software collection"""
@@ -435,6 +542,239 @@ class InventoryTask(BaseTask):
             'hostname': socket.gethostname(),
             'fqdn': socket.getfqdn()
         }
+
+    # ------------------- Windows Enriched Collection -------------------
+    def _ps_json(self, command: str, depth: int = 4) -> Any:
+        """Run a PowerShell command and parse ConvertTo-Json output."""
+        ps = [
+            'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            f"{command} | ConvertTo-Json -Depth {depth}"
+        ]
+        try:
+            result = subprocess.run(ps, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                return None
+            txt = result.stdout.strip()
+            return json.loads(txt) if txt else None
+        except Exception:
+            return None
+
+    # ------------------- Windows Enriched Collection (Modular) -------------------
+    
+    def collect_os_info(self) -> Optional[Dict[str, Any]]:
+        """Collect only OS information."""
+        os_info = self._ps_json('Get-CimInstance Win32_OperatingSystem', depth=5)
+        if not os_info:
+            return None
+        try:
+            if isinstance(os_info, list):
+                os_info = os_info[0]
+            install_date = os_info.get('InstallDate')
+            last_boot = os_info.get('LastBootUpTime')
+            uptime_seconds = None
+            if last_boot:
+                try:
+                    up = self._ps_json('([Datetime]::Now - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds', depth=1)
+                    uptime_seconds = int(float(up)) if up is not None else None
+                except Exception:
+                    pass
+            return {
+                'caption': os_info.get('Caption'),
+                'version': os_info.get('Version'),
+                'build_number': os_info.get('BuildNumber'),
+                'architecture': os_info.get('OSArchitecture'),
+                'install_date': install_date,
+                'last_boot': last_boot,
+                'uptime_seconds': uptime_seconds,
+                'boot_device': os_info.get('BootDevice')
+            }
+        except Exception:
+            return None
+
+    def collect_hardware_summary(self) -> Optional[Dict[str, Any]]:
+        """Collect only hardware summary (manufacturer, model, BIOS, etc.)."""
+        cs = self._ps_json('Get-CimInstance Win32_ComputerSystem', depth=4)
+        bios = self._ps_json('Get-CimInstance Win32_BIOS', depth=4)
+        base = self._ps_json('Get-CimInstance Win32_BaseBoard', depth=4)
+        enc = self._ps_json('Get-CimInstance Win32_SystemEnclosure', depth=4)
+        return {
+            'manufacturer': (cs[0] if isinstance(cs, list) else cs or {}).get('Manufacturer') if cs else None,
+            'model': (cs[0] if isinstance(cs, list) else cs or {}).get('Model') if cs else None,
+            'serial_number': (bios[0] if isinstance(bios, list) else bios or {}).get('SerialNumber') if bios else None,
+            'asset_tag': (bios[0] if isinstance(bios, list) else bios or {}).get('SMBIOSAssetTag') if bios else None,
+            'bios_version': (bios[0] if isinstance(bios, list) else bios or {}).get('SMBIOSBIOSVersion') if bios else None,
+            'baseboard': {
+                'product': (base[0] if isinstance(base, list) else base or {}).get('Product') if base else None,
+                'serial': (base[0] if isinstance(base, list) else base or {}).get('SerialNumber') if base else None
+            },
+            'chassis_types': (enc[0] if isinstance(enc, list) else enc or {}).get('ChassisTypes') if enc else None
+        }
+
+    def collect_cpu_info(self) -> Optional[Any]:
+        """Collect only CPU information."""
+        return self._ps_json('Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,VirtualizationFirmwareEnabled', depth=4)
+
+    def collect_memory_info(self) -> Optional[Dict[str, Any]]:
+        """Collect only memory/RAM information."""
+        mem = self._ps_json('Get-CimInstance Win32_PhysicalMemory | Select-Object BankLabel,Capacity,Manufacturer,PartNumber,SerialNumber,Speed,MemoryType', depth=4)
+        if not mem:
+            return None
+        total = 0
+        try:
+            items = mem if isinstance(mem, list) else [mem]
+            for m in items:
+                cap = m.get('Capacity')
+                if cap:
+                    total += int(cap)
+        except Exception:
+            pass
+        return {
+            'modules': mem,
+            'total_bytes': total if total else None
+        }
+
+    def collect_storage_info(self) -> Optional[Dict[str, Any]]:
+        """Collect only storage/disk information."""
+        disks = self._ps_json('Get-CimInstance Win32_DiskDrive | Select-Object Model,SerialNumber,Size,InterfaceType,MediaType', depth=4)
+        vols = self._ps_json('Get-CimInstance Win32_Volume | Select-Object DriveLetter,Label,FileSystem,Capacity,FreeSpace', depth=4)
+        if not disks:
+            return None
+        return {
+            'physical_disks': disks,
+            'volumes': vols
+        }
+
+    def collect_video_info(self) -> Dict[str, Any]:
+        """Collect only video/display information."""
+        gpu = self._ps_json('Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterRAM,VideoProcessor,CurrentHorizontalResolution,CurrentVerticalResolution', depth=4)
+        mon = self._ps_json('Get-CimInstance -Namespace root\\wmi WmiMonitorID | ForEach-Object { [pscustomobject]@{ ManufacturerID = ([System.Text.Encoding]::ASCII.GetString($_.ManufacturerName -ne 0 | ForEach-Object {[byte]$_})) ; ProductCodeID = ([System.Text.Encoding]::ASCII.GetString($_.ProductCodeID -ne 0 | ForEach-Object {[byte]$_})) ; SerialNumberID = ([System.Text.Encoding]::ASCII.GetString($_.SerialNumberID -ne 0 | ForEach-Object {[byte]$_})) } }', depth=4)
+        return {
+            'gpus': gpu,
+            'monitors': mon
+        }
+
+    def collect_audio_info(self) -> Optional[Any]:
+        """Collect only audio/sound device information."""
+        return self._ps_json('Get-CimInstance Win32_SoundDevice | Select-Object Name,Manufacturer,Status', depth=4)
+
+    def collect_network_info(self) -> Dict[str, Any]:
+        """Collect only network information."""
+        adapters = self._ps_json('Get-CimInstance Win32_NetworkAdapter | Where-Object {$_.PhysicalAdapter -eq $true} | Select-Object Name,NetConnectionStatus,MACAddress,Speed,PNPDeviceID', depth=4)
+        cfg = self._ps_json('Get-CimInstance Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true} | Select-Object Description,MACAddress,IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder', depth=4)
+        routes = self._ps_json('Get-NetRoute -AddressFamily IPv4 | Select-Object DestinationPrefix,NextHop,InterfaceAlias,RouteMetric', depth=4)
+        return {
+            'adapters': adapters,
+            'config': cfg,
+            'routes': routes
+        }
+
+    def collect_printer_info(self) -> Optional[Any]:
+        """Collect only printer information."""
+        return self._ps_json('Get-CimInstance Win32_Printer | Select-Object Name,DriverName,PortName,WorkOffline,Default', depth=4)
+
+    def collect_software_info(self) -> Optional[Any]:
+        """Collect only installed software information."""
+        software_cmd = (
+            "$paths = @('HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall');"
+            "$apps = foreach ($p in $paths) { Get-ChildItem $p -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PsPath -ErrorAction SilentlyContinue | Select-Object DisplayName,DisplayVersion,Publisher,InstallDate,EstimatedSize } };"
+            "$apps | Where-Object { $_.DisplayName }"
+        )
+        return self._ps_json(software_cmd, depth=4)
+
+    def collect_updates_info(self) -> Optional[Any]:
+        """Collect only Windows updates/hotfixes information."""
+        return self._ps_json('Get-CimInstance Win32_QuickFixEngineering | Select-Object HotFixID,Description,InstalledOn', depth=4)
+
+    def collect_drivers_info(self) -> Optional[Any]:
+        """Collect only driver information."""
+        return self._ps_json('Get-CimInstance Win32_PnPSignedDriver | Select-Object DeviceName,DriverVersion,DriverDate,Manufacturer,ClassGuid', depth=4)
+
+    def collect_services_info(self) -> Optional[Any]:
+        """Collect only services information."""
+        return self._ps_json('Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName', depth=4)
+
+    def collect_accounts_info(self) -> Optional[Dict[str, Any]]:
+        """Collect only users and groups information."""
+        users = self._ps_json('Get-CimInstance Win32_UserAccount -Filter "LocalAccount=True" | Select-Object Name,FullName,Disabled,Lockout,PasswordChangeable,PasswordExpires,PasswordRequired', depth=4)
+        groups = self._ps_json('Get-CimInstance Win32_Group -Filter "LocalAccount=True" | Select-Object Name,Description', depth=4)
+        if not users and not groups:
+            return None
+        return {
+            'users': users,
+            'groups': groups
+        }
+
+    def collect_security_info(self) -> Dict[str, Any]:
+        """Collect only security information (TPM, firewall)."""
+        tpm = self._ps_json('Get-Tpm', depth=4)
+        firewall = self._ps_json('Get-NetFirewallProfile | Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction', depth=4)
+        return {
+            'tpm': tpm,
+            'firewall_profiles': firewall
+        }
+
+    def collect_shares_info(self) -> Optional[Any]:
+        """Collect only network shares information."""
+        return self._ps_json('Get-CimInstance Win32_Share | Select-Object Name,Path,Description,Type', depth=4)
+
+    def collect_power_info(self) -> Optional[Dict[str, Any]]:
+        """Collect only battery/power information."""
+        battery = self._ps_json('Get-CimInstance Win32_Battery | Select-Object Name,BatteryStatus,EstimatedChargeRemaining,EstimatedRunTime,DesignCapacity,FullChargeCapacity', depth=4)
+        if not battery:
+            return None
+        return {
+            'batteries': battery
+        }
+
+    def _collect_windows_enriched(self, categories: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Collect extended Windows inventory via CIM/registry.
+        
+        Args:
+            categories: Optional list of specific categories to collect.
+                       If None, collects all categories.
+                       Valid categories: 'os', 'hardware', 'cpu', 'memory', 'storage',
+                       'video', 'audio', 'network', 'printers', 'software', 'updates',
+                       'drivers', 'services', 'accounts', 'security', 'shares', 'power'
+        
+        Returns:
+            Dictionary with collected inventory data
+        """
+        data: Dict[str, Any] = {}
+        collect_all = categories is None or len(categories) == 0
+        
+        # Map category names to methods
+        category_map = {
+            'os': ('operating_system', self.collect_os_info),
+            'hardware': ('hardware_summary', self.collect_hardware_summary),
+            'cpu': ('cpu', self.collect_cpu_info),
+            'memory': ('memory', self.collect_memory_info),
+            'storage': ('storage', self.collect_storage_info),
+            'video': ('video', self.collect_video_info),
+            'audio': ('audio', self.collect_audio_info),
+            'network': ('network_detail', self.collect_network_info),
+            'printers': ('printers', self.collect_printer_info),
+            'software': ('software', self.collect_software_info),
+            'updates': ('updates', self.collect_updates_info),
+            'drivers': ('drivers', self.collect_drivers_info),
+            'services': ('services', self.collect_services_info),
+            'accounts': ('accounts', self.collect_accounts_info),
+            'security': ('security', self.collect_security_info),
+            'shares': ('shares', self.collect_shares_info),
+            'power': ('power', self.collect_power_info),
+        }
+        
+        # Collect requested categories
+        for cat_key, (output_key, method) in category_map.items():
+            if collect_all or cat_key in categories:
+                try:
+                    result = method()
+                    if result is not None:
+                        data[output_key] = result
+                except Exception:
+                    pass  # Skip failed categories
+        
+        return data
    
     def _send_to_server(self, data: Dict):
         """Send inventory to server"""
