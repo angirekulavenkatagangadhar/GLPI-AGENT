@@ -889,7 +889,38 @@ def run_function(module: str, function: str, params=None,
         nonlocal result
         try:
             mod = importlib.import_module(module)
-            func = getattr(mod, function)
+            
+            # Try to get function directly from module
+            func = None
+            if hasattr(mod, function):
+                func = getattr(mod, function)
+            else:
+                # Try snake_case version (isEnabled -> is_enabled, doInventory -> do_inventory)
+                snake_func = function.replace('isEnabled', 'is_enabled').replace('doInventory', 'do_inventory')
+                if hasattr(mod, snake_func):
+                    func = getattr(mod, snake_func)
+                else:
+                    # Try to find a class in the module
+                    # Get class name from last part of module name (e.g., CPU from GLPI.Agent.Task.Inventory.Win32.CPU)
+                    module_parts = module.split('.')
+                    class_name = module_parts[-1] if module_parts else ''
+                    
+                    if class_name and hasattr(mod, class_name):
+                        cls = getattr(mod, class_name)
+                        # Try to get method from class (try both camelCase and snake_case)
+                        method_name = None
+                        if hasattr(cls, function):
+                            method_name = function
+                        elif hasattr(cls, snake_func):
+                            method_name = snake_func
+                        
+                        if method_name:
+                            # Create instance and call method
+                            instance = cls()
+                            func = getattr(instance, method_name)
+            
+            if func is None:
+                raise AttributeError(f"module '{module}' has no attribute '{function}'")
             
             if isinstance(params, dict):
                 result = func(**params)

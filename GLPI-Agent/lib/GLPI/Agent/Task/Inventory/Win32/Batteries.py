@@ -2,8 +2,8 @@
 
 import os
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import can_run, has_folder, has_file, get_all_lines
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, has_folder, has_file, get_all_lines
 from glpi_agent.tools.batteries import (
     InventoryBatteries, sanitize_battery_serial, get_canonical_capacity
 )

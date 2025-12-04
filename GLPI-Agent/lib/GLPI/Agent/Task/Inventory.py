@@ -15,22 +15,23 @@ from typing import Any, Dict, List, Optional
 
 # Import base classes and dependencies
 try:
-    from .task import GLPITask
-    from .tools import trim_whitespace, run_function, any_func, empty
-    from .inventory import Inventory
-    from .xml_handler import XMLHandler
-    from .event import Event
-    from .inventory_module import InventoryModule
-    from .inventory_version import VERSION
-except ImportError:
+    from GLPI.Agent.Task import GLPITask
+    from GLPI.Agent.Tools import trim_whitespace, run_function, any_func, empty
+    from GLPI.Agent.Inventory import Inventory
+    from GLPI.Agent.Event import Event
+    from GLPI.Agent.Task.Inventory.Module import InventoryModule
+    from GLPI.Agent.Task.Inventory.Version import VERSION
+    from GLPI.Agent.Protocol.Message import ProtocolMessage
+except ImportError as e:
+    import sys
+    print(f"Warning: Could not import dependencies for InventoryTask: {e}", file=sys.stderr)
     try:
-        from glpi_agent.task.task import GLPITask
-        from glpi_agent.tools import trim_whitespace, run_function, any_func, empty
-        from glpi_agent.inventory import Inventory
-        from glpi_agent.xml_handler import XMLHandler
-        from glpi_agent.event import Event
-        from glpi_agent.task.inventory_module import InventoryModule
-        from glpi_agent.task.inventory_version import VERSION
+        from ..Task import GLPITask
+        from ..Tools import trim_whitespace, run_function, any_func, empty
+        from ..Inventory import Inventory
+        from ..Event import Event
+        from .Inventory.Module import InventoryModule
+        from .Inventory.Version import VERSION
     except ImportError:
         # Fallback implementations
         class GLPITask:
@@ -40,6 +41,7 @@ except ImportError:
         class InventoryModule:
             pass
         VERSION = "1.22"
+        ProtocolMessage = None  # Will be imported when needed
 
 
 class InventoryTask(GLPITask):
@@ -539,13 +541,14 @@ class InventoryTask(GLPITask):
                 self.modules[module_name] = {'enabled': 0}
                 continue
             
-            # Skip if parent not enabled
-            if parent and not self.modules.get(parent, {}).get('enabled'):
-                logger.debug2(
-                    f"  {module_name} disabled: implicit dependency {parent} not enabled"
-                )
-                self.modules[module_name] = {'enabled': 0}
-                continue
+            # Skip if parent not enabled (but only if parent is actually a discovered module, not just a package directory)
+            if parent and parent in modules:
+                if not self.modules.get(parent, {}).get('enabled'):
+                    logger.debug2(
+                        f"  {module_name} disabled: implicit dependency {parent} not enabled"
+                    )
+                    self.modules[module_name] = {'enabled': 0}
+                    continue
             
             # Try to load module
             try:
@@ -753,9 +756,17 @@ class InventoryTask(GLPITask):
         
         elif file.endswith('.json'):
             try:
-                from glpi_agent.protocol.message import ProtocolMessage
-                json = ProtocolMessage(file=file)
-                content = json.get('content')
+                # Import ProtocolMessage (may not be available if import failed at top)
+                try:
+                    from GLPI.Agent.Protocol.Message import ProtocolMessage
+                except ImportError:
+                    ProtocolMessage = None
+                
+                if ProtocolMessage is None:
+                    raise ImportError("ProtocolMessage not available")
+                
+                protocol_msg = ProtocolMessage(file=file)
+                content = protocol_msg.get('content')
                 if not content:
                     self.logger.error(
                         f"failing to import {file} file content in the inventory"

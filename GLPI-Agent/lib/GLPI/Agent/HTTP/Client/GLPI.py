@@ -14,14 +14,15 @@ from urllib.parse import urlparse
 import requests
 
 try:
-    from .http_client import HTTPClient
-    from .protocol_message import ProtocolMessage
-    from ..tools.uuid import is_uuid_string, uuid_to_string
+    from GLPI.Agent.HTTP.Client import HTTPClient
+    from GLPI.Agent.Protocol.Message import ProtocolMessage
+    from GLPI.Agent.Tools.UUID import is_uuid_string, uuid_to_string
 except ImportError:
     try:
-        from glpi_agent.http.http_client import HTTPClient
-        from glpi_agent.protocol.protocol_message import ProtocolMessage
-        from glpi_agent.tools.uuid import is_uuid_string, uuid_to_string
+        # Try alternative import paths
+        from ..Client import HTTPClient
+        from ...Protocol.Message import ProtocolMessage
+        from ...Tools.UUID import is_uuid_string, uuid_to_string
     except ImportError:
         # Fallback implementations
         class HTTPClient:
@@ -139,10 +140,12 @@ class GLPIHTTPClient(HTTPClient):
         logger.debug2(_log_prefix() + f"sending message:\n{request_content}")
         
         # Compress content
+        logger.debug2(_log_prefix() + f"compressing {len(request_content)} bytes")
         request_content_bytes = self.compress(request_content.encode('utf-8'))
         if not request_content_bytes:
             logger.error(_log_prefix() + 'inflating problem')
             return None
+        logger.debug2(_log_prefix() + f"compressed to {len(request_content_bytes)} bytes")
         
         # Create HTTP request
         request = requests.Request(
@@ -151,6 +154,7 @@ class GLPIHTTPClient(HTTPClient):
             data=request_content_bytes,
             headers=self.session.headers
         )
+        logger.debug2(_log_prefix() + f"created POST request to {url}")
         
         # Send with retry logic for pending status
         answer = None
@@ -163,8 +167,39 @@ class GLPIHTTPClient(HTTPClient):
             # Send request
             response = self.request(request)
             
+            # Check if response is valid (use 'is None' to avoid triggering __bool__)
+            if response is None:
+                logger.error(_log_prefix() + "no response from server")
+                return None
+            
+            # Check if response has required attributes
+            status_code = getattr(response, 'status_code', None)
+            logger.debug2(_log_prefix() + f"received response with status: {status_code}")
+            
+            if status_code is None:
+                logger.error(_log_prefix() + f"invalid response object: {type(response)}, has status_code: {hasattr(response, 'status_code')}")
+                return None
+            
+            # Check for success
+            is_success = (200 <= response.status_code < 300)
+            
             # Check for timeout
-            if not response.ok and 'read timeout' not in response.reason.lower():
+            reason = getattr(response, 'reason', '') or ''
+            if not is_success and 'read timeout' not in str(reason).lower():
+                # Try to get error message from response
+                try:
+                    error_content = response.content
+                    if error_content:
+                        # Try to decompress if needed
+                        content_type = response.headers.get('Content-Type', '')
+                        if 'compress' in content_type or 'gzip' in content_type:
+                            error_content = self.uncompress(error_content, content_type)
+                        error_msg = error_content.decode('utf-8', errors='ignore') if error_content else ''
+                        logger.error(_log_prefix() + f"server returned {response.status_code}: {reason}")
+                        if error_msg:
+                            logger.error(_log_prefix() + f"server error message: {error_msg[:500]}")
+                except:
+                    logger.error(_log_prefix() + f"server returned {response.status_code}: {reason}")
                 return None
             
             # Update request ID from response
@@ -176,9 +211,9 @@ class GLPIHTTPClient(HTTPClient):
                 _request_id = None
             
             # Check response content
-            content = response.content
+            content = response.content if hasattr(response, 'content') else None
             if not content:
-                if response.ok:
+                if is_success:
                     logger.error(_log_prefix() + "answer without content")
                 return None
             
@@ -188,7 +223,7 @@ class GLPIHTTPClient(HTTPClient):
                 uncompressed = self.uncompress(content, content_type)
                 if not uncompressed:
                     if not len(content):
-                        if response.ok:
+                        if is_success:
                             logger.error(_log_prefix() + "Got empty answer")
                         return None
                     logger.error(
@@ -228,7 +263,7 @@ class GLPIHTTPClient(HTTPClient):
                 return None
             
             # Check for errors
-            if answer.status() == 'error' or not response.ok:
+            if answer.status() == 'error' or not is_success:
                 message = answer.get('message')
                 if message:
                     # Handle JSON validation errors specially

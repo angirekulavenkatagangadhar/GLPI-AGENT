@@ -8,6 +8,7 @@ import importlib
 import importlib.util
 import uuid
 import json
+import gzip
 import socket
 import subprocess
 import xml.etree.ElementTree as ET
@@ -19,6 +20,16 @@ import platform
 import shutil
 import ctypes
 import re
+
+# Try to import proper Target classes
+try:
+    from GLPI.Agent.Target.Server import ServerTarget as ProperServerTarget
+    from GLPI.Agent.Target.Local import LocalTarget as ProperLocalTarget
+    USE_PROPER_TARGETS = True
+except ImportError:
+    ProperServerTarget = None
+    ProperLocalTarget = None
+    USE_PROPER_TARGETS = False
 
 # Version information - exact match to Perl
 VERSION = "1.7.0"
@@ -134,21 +145,39 @@ class Config:
             servers = [servers]
        
         for i, server_url in enumerate(servers):
-            target = ServerTarget(
-                id=f"server_{i}",
-                url=server_url,
-                logger=logger,
-                vardir=vardir
-            )
+            # Use proper ServerTarget if available
+            if USE_PROPER_TARGETS and ProperServerTarget:
+                target = ProperServerTarget(
+                    logger=logger,
+                    config=self,
+                    url=server_url,
+                    basevardir=vardir or '.'
+                )
+            else:
+                target = ServerTarget(
+                    id=f"server_{i}",
+                    url=server_url,
+                    logger=logger,
+                    vardir=vardir
+                )
             targets.append(target)
        
         local_path = self.get('local')
         if local_path:
-            target = LocalTarget(
-                id='local_0',
-                path=local_path,
-                logger=logger
-            )
+            # Use proper LocalTarget if available
+            if USE_PROPER_TARGETS and ProperLocalTarget:
+                target = ProperLocalTarget(
+                    logger=logger,
+                    config=self,
+                    path=local_path,
+                    basevardir=vardir or '.'
+                )
+            else:
+                target = LocalTarget(
+                    id='local_0',
+                    path=local_path,
+                    logger=logger
+                )
             targets.append(target)
        
         return targets
@@ -254,6 +283,23 @@ class BaseTarget:
         self._next_run_date = 0
         self._max_delay = 3600
         self._paused = False
+        
+        # Create storage object
+        try:
+            from GLPI.Agent.Storage import Storage
+            self.storage = Storage(logger=logger, directory=vardir)
+        except ImportError:
+            # Simple fallback storage
+            class SimpleStorage:
+                def __init__(self, directory=None):
+                    self.directory = directory or '.'
+                def getDirectory(self):
+                    return self.directory
+            self.storage = SimpleStorage(vardir)
+    
+    def getStorage(self):
+        """Get storage object"""
+        return self.storage
         self._glpi_server = None
         self._task_servers = {}
         self._events = []
@@ -328,9 +374,61 @@ class ServerTarget(BaseTarget):
         super().__init__(id, logger, vardir)
         self._type = 'server'
         self.url = url
+        self._is_glpi_server = 0
+        self.tasks = []
+        self._server_task_support = {}
    
     def get_url(self) -> str:
         return self.url
+    
+    def getUrl(self):
+        """Get target URL - Perl naming convention"""
+        return self.url
+    
+    def getName(self):
+        """Get target name (URL without userinfo)"""
+        return self.url
+    
+    def getType(self):
+        """Get target type"""
+        return 'server'
+    
+    def isGlpiServer(self, value=None):
+        """Check/set if this is a GLPI server"""
+        if value is not None:
+            if str(value).lower() in ['1', 'true', 'yes']:
+                self._is_glpi_server = 1
+            else:
+                self._is_glpi_server = 0
+        return self._is_glpi_server
+    
+    def plannedTasks(self, *tasks):
+        """Get/set planned tasks"""
+        if tasks:
+            self.tasks = list(tasks)
+        return self.tasks
+    
+    def setServerTaskSupport(self, task, support):
+        """Set server task support info"""
+        if task and isinstance(support, dict):
+            if support.get('server') and support.get('version'):
+                self._server_task_support[task.lower()] = support
+    
+    def doProlog(self):
+        """Check if PROLOG is needed"""
+        if not self._server_task_support:
+            return True
+        return any(
+            info.get('server') == 'glpiinventory' 
+            for info in self._server_task_support.values()
+        )
+    
+    def getTaskServer(self, task):
+        """Get server type for task"""
+        task_lower = task.lower()
+        if task_lower in self._server_task_support:
+            return self._server_task_support[task_lower].get('server')
+        return None
 
 
 class LocalTarget(BaseTarget):
@@ -594,15 +692,18 @@ class InventoryTask(BaseTask):
     def collect_hardware_summary(self) -> Optional[Dict[str, Any]]:
         """Collect only hardware summary (manufacturer, model, BIOS, etc.)."""
         cs = self._ps_json('Get-CimInstance Win32_ComputerSystem', depth=4)
-        bios = self._ps_json('Get-CimInstance Win32_BIOS', depth=4)
+        bios = self._ps_json('Get-CimInstance Win32_BIOS | Select-Object Manufacturer,SerialNumber,SMBIOSBIOSVersion,SMBIOSAssetTag,ReleaseDate', depth=4)
         base = self._ps_json('Get-CimInstance Win32_BaseBoard', depth=4)
         enc = self._ps_json('Get-CimInstance Win32_SystemEnclosure', depth=4)
+        bios_obj = (bios[0] if isinstance(bios, list) else bios) if bios else {}
         return {
             'manufacturer': (cs[0] if isinstance(cs, list) else cs or {}).get('Manufacturer') if cs else None,
             'model': (cs[0] if isinstance(cs, list) else cs or {}).get('Model') if cs else None,
-            'serial_number': (bios[0] if isinstance(bios, list) else bios or {}).get('SerialNumber') if bios else None,
-            'asset_tag': (bios[0] if isinstance(bios, list) else bios or {}).get('SMBIOSAssetTag') if bios else None,
-            'bios_version': (bios[0] if isinstance(bios, list) else bios or {}).get('SMBIOSBIOSVersion') if bios else None,
+            'serial_number': bios_obj.get('SerialNumber') if bios_obj else None,
+            'asset_tag': bios_obj.get('SMBIOSAssetTag') if bios_obj else None,
+            'bios_version': bios_obj.get('SMBIOSBIOSVersion') if bios_obj else None,
+            'bios_release_date': bios_obj.get('ReleaseDate') if bios_obj else None,
+            'bios_manufacturer': bios_obj.get('Manufacturer') if bios_obj else None,
             'baseboard': {
                 'product': (base[0] if isinstance(base, list) else base or {}).get('Product') if base else None,
                 'serial': (base[0] if isinstance(base, list) else base or {}).get('SerialNumber') if base else None
@@ -612,7 +713,7 @@ class InventoryTask(BaseTask):
 
     def collect_cpu_info(self) -> Optional[Any]:
         """Collect only CPU information."""
-        return self._ps_json('Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,VirtualizationFirmwareEnabled', depth=4)
+        return self._ps_json('Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentClockSpeed,BaseClockSpeed,VirtualizationFirmwareEnabled', depth=4)
 
     def collect_memory_info(self) -> Optional[Dict[str, Any]]:
         """Collect only memory/RAM information."""
@@ -652,6 +753,35 @@ class InventoryTask(BaseTask):
             'gpus': gpu,
             'monitors': mon
         }
+    
+    def collect_monitors_info(self) -> Dict[str, Any]:
+        """Collect detailed monitor/display information."""
+        # Collect from Win32_DesktopMonitor (try with and without Availability filter)
+        # Some systems don't report Availability correctly, so we'll try both
+        desktop_monitors = self._ps_json('Get-CimInstance Win32_DesktopMonitor | Where-Object { $_.Availability -eq 3 -or $_.Availability -eq $null } | Select-Object Caption,MonitorManufacturer,MonitorType,PNPDeviceID,Availability', depth=4)
+        # If no results, try without filter
+        if not desktop_monitors or (isinstance(desktop_monitors, list) and len(desktop_monitors) == 0):
+            desktop_monitors = self._ps_json('Get-CimInstance Win32_DesktopMonitor | Select-Object Caption,MonitorManufacturer,MonitorType,PNPDeviceID,Availability', depth=4)
+        
+        # Collect from WMIMonitorConnectionParams (Vista+, includes connection type)
+        monitor_connections = self._ps_json('Get-CimInstance -Namespace root\\wmi WMIMonitorConnectionParams | Where-Object { $_.Active -eq $true } | Select-Object Active,InstanceName,VideoOutputTechnology', depth=4)
+        
+        # Collect from WmiMonitorID (EDID data)
+        monitor_ids = self._ps_json('Get-CimInstance -Namespace root\\wmi WmiMonitorID | ForEach-Object { [pscustomobject]@{ InstanceName = $_.InstanceName ; ManufacturerID = ([System.Text.Encoding]::ASCII.GetString($_.ManufacturerName -ne 0 | ForEach-Object {[byte]$_})) ; ProductCodeID = ([System.Text.Encoding]::ASCII.GetString($_.ProductCodeID -ne 0 | ForEach-Object {[byte]$_})) ; SerialNumberID = ([System.Text.Encoding]::ASCII.GetString($_.SerialNumberID -ne 0 | ForEach-Object {[byte]$_})) } }', depth=4)
+        
+        # Normalize to lists for counting
+        dm_count = len(desktop_monitors) if isinstance(desktop_monitors, list) else (1 if desktop_monitors else 0)
+        mc_count = len(monitor_connections) if isinstance(monitor_connections, list) else (1 if monitor_connections else 0)
+        mi_count = len(monitor_ids) if isinstance(monitor_ids, list) else (1 if monitor_ids else 0)
+        
+        if self.logger:
+            self.logger.info(f"Collected monitor data: {dm_count} desktop monitors, {mc_count} connections, {mi_count} monitor IDs")
+        
+        return {
+            'desktop_monitors': desktop_monitors,
+            'monitor_connections': monitor_connections,
+            'monitor_ids': monitor_ids
+        }
 
     def collect_audio_info(self) -> Optional[Any]:
         """Collect only audio/sound device information."""
@@ -659,11 +789,55 @@ class InventoryTask(BaseTask):
 
     def collect_network_info(self) -> Dict[str, Any]:
         """Collect only network information."""
-        adapters = self._ps_json('Get-CimInstance Win32_NetworkAdapter | Where-Object {$_.PhysicalAdapter -eq $true} | Select-Object Name,NetConnectionStatus,MACAddress,Speed,PNPDeviceID', depth=4)
+        # Get physical adapters (Ethernet, Wi-Fi, etc.) - this should include WiFi
+        adapters = self._ps_json('Get-CimInstance Win32_NetworkAdapter | Where-Object {$_.PhysicalAdapter -eq $true} | Select-Object Name,NetConnectionStatus,MACAddress,Speed,PNPDeviceID,AdapterTypeID', depth=4)
+        # Also get Bluetooth adapters separately (they might not be marked as PhysicalAdapter)
+        # Use more specific query to avoid catching WiFi adapters
+        bluetooth_adapters = self._ps_json('Get-CimInstance Win32_NetworkAdapter | Where-Object {($_.Name -like "*Bluetooth*" -and $_.Name -notlike "*WiFi*" -and $_.Name -notlike "*Wireless*") -or ($_.PNPDeviceID -like "*BTHENUM*" -and $_.PNPDeviceID -notlike "*802.11*")} | Select-Object Name,NetConnectionStatus,MACAddress,Speed,PNPDeviceID,AdapterTypeID', depth=4)
+        # Get LinkSpeed from Get-NetAdapter (more reliable for active adapters)
+        net_adapters = self._ps_json('Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object Name,MACAddress,LinkSpeed', depth=4)
         cfg = self._ps_json('Get-CimInstance Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true} | Select-Object Description,MACAddress,IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder', depth=4)
         routes = self._ps_json('Get-NetRoute -AddressFamily IPv4 | Select-Object DestinationPrefix,NextHop,InterfaceAlias,RouteMetric', depth=4)
+        
+        # Normalize adapters to a list first
+        if not adapters:
+            all_adapters = []
+        elif isinstance(adapters, list):
+            all_adapters = adapters
+        else:
+            # Single adapter returned as dict
+            all_adapters = [adapters]
+        
+        # Add Bluetooth adapters if they exist, avoiding duplicates
+        if bluetooth_adapters:
+            # Normalize Bluetooth adapters to list
+            if not isinstance(bluetooth_adapters, list):
+                bluetooth_adapters = [bluetooth_adapters]
+            
+            # Create set of existing MAC addresses for duplicate detection
+            existing_macs = set()
+            for a in all_adapters:
+                if isinstance(a, dict):
+                    mac = a.get('MACAddress', '')
+                    if mac:
+                        existing_macs.add(str(mac).upper().strip())
+            
+            # Add Bluetooth adapters that aren't already in the list
+            for bt_adapter in bluetooth_adapters:
+                if isinstance(bt_adapter, dict):
+                    bt_mac = bt_adapter.get('MACAddress', '')
+                    if bt_mac:
+                        bt_mac_normalized = str(bt_mac).upper().strip()
+                        if bt_mac_normalized not in existing_macs:
+                            all_adapters.append(bt_adapter)
+                            existing_macs.add(bt_mac_normalized)
+                    else:
+                        # Bluetooth adapter without MAC - add it anyway (might be virtual)
+                        all_adapters.append(bt_adapter)
+        
         return {
-            'adapters': adapters,
+            'adapters': all_adapters,
+            'net_adapters': net_adapters,  # Get-NetAdapter data with LinkSpeed
             'config': cfg,
             'routes': routes
         }
@@ -717,14 +891,255 @@ class InventoryTask(BaseTask):
         """Collect only network shares information."""
         return self._ps_json('Get-CimInstance Win32_Share | Select-Object Name,Path,Description,Type', depth=4)
 
+    def collect_ports_info(self) -> Optional[Any]:
+        """Collect port information (COM, LPT, USB controllers)."""
+        # Get serial ports (COM ports)
+        com_ports = self._ps_json('Get-CimInstance Win32_SerialPort | Select-Object Name,Description,DeviceID', depth=4)
+        # Get parallel ports (LPT ports)
+        lpt_ports = self._ps_json('Get-CimInstance Win32_ParallelPort | Select-Object Name,Description,DeviceID', depth=4)
+        # Get USB controllers (as ports)
+        usb_controllers = self._ps_json('Get-CimInstance Win32_USBController | Select-Object Name,Description,DeviceID', depth=4)
+        return {
+            'com_ports': com_ports,
+            'lpt_ports': lpt_ports,
+            'usb_controllers': usb_controllers
+        }
+    
     def collect_power_info(self) -> Optional[Dict[str, Any]]:
         """Collect only battery/power information."""
-        battery = self._ps_json('Get-CimInstance Win32_Battery | Select-Object Name,BatteryStatus,EstimatedChargeRemaining,EstimatedRunTime,DesignCapacity,FullChargeCapacity', depth=4)
+        # Get detailed battery info including chemistry, voltage, serial, manufacturer, date
+        battery = self._ps_json('Get-CimInstance Win32_Battery | Select-Object Name,DesignCapacity,FullChargeCapacity,DesignVoltage,Chemistry,EstimatedChargeRemaining,Status,Availability,DeviceID,ManufactureDate,ManufactureName,BatteryStatus,ExpectedLife,TimeOnBattery', depth=4)
+        
+        # Try to get additional battery data from battery report XML (like Perl version)
+        # This can provide capacity, manufacturer, and cycle count when WMI fields are null
+        battery_report_data = {}
+        try:
+            import tempfile
+            import os
+            import subprocess
+            import xml.etree.ElementTree as ET
+            
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
+                report_path = f.name
+            
+            try:
+                # Run powercfg to generate battery report XML (like Perl version)
+                result = subprocess.run(
+                    ['powercfg', '/batteryreport', '/xml', '/output', report_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                
+                if os.path.exists(report_path) and os.path.getsize(report_path) > 0:
+                    # Parse battery report XML
+                    try:
+                        tree = ET.parse(report_path)
+                        root = tree.getroot()
+                        
+                        # XML structure: root is BatteryReport -> Batteries -> Battery[]
+                        # Handle namespace if present
+                        if root.tag.endswith('BatteryReport') or root.tag == 'BatteryReport':
+                            batteries = root.find('Batteries')
+                            if batteries is None:
+                                # Try with namespace
+                                for child in root:
+                                    if child.tag.endswith('Batteries') or child.tag == 'Batteries':
+                                        batteries = child
+                                        break
+                            
+                            if batteries is not None:
+                                # Get the first battery (usually there's only one)
+                                battery_elem = batteries.find('Battery')
+                                if battery_elem is None:
+                                    # Try with namespace or as list
+                                    for child in batteries:
+                                        if child.tag.endswith('Battery') or child.tag == 'Battery':
+                                            battery_elem = child
+                                            break
+                                
+                                if battery_elem is not None:
+                                    # Extract DesignCapacity
+                                    design_cap_elem = battery_elem.find('DesignCapacity')
+                                    if design_cap_elem is None:
+                                        for child in battery_elem:
+                                            if child.tag.endswith('DesignCapacity') or child.tag == 'DesignCapacity':
+                                                design_cap_elem = child
+                                                break
+                                    if design_cap_elem is not None and design_cap_elem.text:
+                                        try:
+                                            battery_report_data['DesignCapacity'] = int(design_cap_elem.text)
+                                        except ValueError:
+                                            pass
+                                    
+                                    # Extract FullChargeCapacity
+                                    full_cap_elem = battery_elem.find('FullChargeCapacity')
+                                    if full_cap_elem is None:
+                                        for child in battery_elem:
+                                            if child.tag.endswith('FullChargeCapacity') or child.tag == 'FullChargeCapacity':
+                                                full_cap_elem = child
+                                                break
+                                    if full_cap_elem is not None and full_cap_elem.text:
+                                        try:
+                                            battery_report_data['FullChargeCapacity'] = int(full_cap_elem.text)
+                                        except ValueError:
+                                            pass
+                                    
+                                    # Extract Manufacturer
+                                    manuf_elem = battery_elem.find('Manufacturer')
+                                    if manuf_elem is None:
+                                        for child in battery_elem:
+                                            if child.tag.endswith('Manufacturer') or child.tag == 'Manufacturer':
+                                                manuf_elem = child
+                                                break
+                                    if manuf_elem is not None and manuf_elem.text:
+                                        manuf = manuf_elem.text.strip()
+                                        if manuf:
+                                            battery_report_data['ManufactureName'] = manuf
+                                    
+                                    # Extract CycleCount
+                                    cycle_elem = battery_elem.find('CycleCount')
+                                    if cycle_elem is None:
+                                        for child in battery_elem:
+                                            if child.tag.endswith('CycleCount') or child.tag == 'CycleCount':
+                                                cycle_elem = child
+                                                break
+                                    if cycle_elem is not None and cycle_elem.text:
+                                        try:
+                                            battery_report_data['CycleCount'] = int(cycle_elem.text)
+                                        except ValueError:
+                                            pass
+                    except ET.ParseError as e:
+                        # XML parsing failed, skip
+                        if self.logger:
+                            self.logger.debug(f"Battery report XML parsing error: {e}")
+                        pass
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.debug(f"Battery report parsing error: {e}")
+                        pass
+            except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError):
+                # powercfg not available or permission denied - silently skip
+                pass
+            except Exception:
+                # Any other error - silently skip
+                pass
+            finally:
+                # Clean up temp file
+                try:
+                    if os.path.exists(report_path):
+                        os.unlink(report_path)
+                except Exception:
+                    pass
+        except Exception:
+            # If anything fails, just continue without battery report data
+            pass
+        
         if not battery:
             return None
+        
+        # Merge battery report data into battery data (fills in missing WMI fields)
+        if battery_report_data:
+            if isinstance(battery, list) and len(battery) > 0:
+                if isinstance(battery[0], dict):
+                    # Fill in missing fields from battery report
+                    for key, value in battery_report_data.items():
+                        if not battery[0].get(key) or battery[0].get(key) is None:
+                            battery[0][key] = value
+            elif isinstance(battery, dict):
+                # Fill in missing fields from battery report
+                for key, value in battery_report_data.items():
+                    if not battery.get(key) or battery.get(key) is None:
+                        battery[key] = value
+        
         return {
             'batteries': battery
         }
+    
+    def collect_controllers_info(self) -> Optional[Any]:
+        """Collect controller information (PCI devices, USB controllers, etc.).
+        
+        This follows the Perl Win32 Controllers module approach:
+        - Only includes controllers with PCI vendor/product IDs
+        - Uses PCI database to get proper names/manufacturers
+        - Avoids duplicates by vendor/product ID
+        """
+        import re
+        all_controllers = []
+        seen_vendor_product = {}  # Track duplicates by vendor/product ID
+        
+        # List of WMI controller classes to query (same as Perl module)
+        controller_classes = [
+            'Win32_FloppyController',
+            'Win32_IDEController', 
+            'Win32_SCSIController',
+            'Win32_VideoController',
+            'Win32_InfraredDevice',
+            'Win32_USBController',
+            'Win32_1394Controller',
+            'Win32_PCMCIAController',
+            'CIM_LogicalDevice'
+        ]
+        
+        for class_name in controller_classes:
+            try:
+                controllers = self._ps_json(f'Get-CimInstance {class_name} | Select-Object Name,Manufacturer,Caption,DeviceID', depth=4)
+                if controllers:
+                    controllers_list = controllers if isinstance(controllers, list) else [controllers]
+                    for ctrl in controllers_list:
+                        if not isinstance(ctrl, dict) or not ctrl.get('DeviceID'):
+                            continue
+                        
+                        device_id = str(ctrl.get('DeviceID', ''))
+                        
+                        # Extract vendor and product IDs from DeviceID (PCI format)
+                        vendor_match = re.search(r'PCI\\VEN_([A-F0-9]{4})&DEV_([A-F0-9]{4})', device_id, re.IGNORECASE)
+                        if not vendor_match:
+                            # Skip if no PCI vendor/product ID (following Perl approach)
+                            continue
+                        
+                        vendor_id = vendor_match.group(1).lower()
+                        product_id = vendor_match.group(2).lower()
+                        
+                        # Avoid duplicates by vendor/product ID (same as Perl)
+                        if vendor_id not in seen_vendor_product:
+                            seen_vendor_product[vendor_id] = {}
+                        if product_id in seen_vendor_product[vendor_id]:
+                            continue
+                        seen_vendor_product[vendor_id][product_id] = True
+                        
+                        # Extract subsystem ID if available
+                        subsystem_id = None
+                        subsys_match = re.search(r'&SUBSYS_([A-F0-9]{4})([A-F0-9]{4})', device_id, re.IGNORECASE)
+                        if subsys_match:
+                            subsystem_id = f"{subsys_match.group(2).lower()}:{subsys_match.group(1).lower()}"
+                        
+                        controller_entry = {
+                            'Name': ctrl.get('Name', ''),
+                            'Manufacturer': ctrl.get('Manufacturer', ''),
+                            'Caption': ctrl.get('Caption', ''),
+                            'DeviceID': device_id,
+                            'VENDORID': vendor_id,
+                            'PRODUCTID': product_id,
+                            'Class': class_name.replace('Win32_', '').replace('Controller', '')
+                        }
+                        
+                        if subsystem_id:
+                            controller_entry['PCISUBSYSTEMID'] = subsystem_id
+                        
+                        all_controllers.append(controller_entry)
+            except Exception as e:
+                # Skip if class doesn't exist or query fails
+                if hasattr(self, 'logger'):
+                    self.logger.debug(f"Error querying {class_name}: {e}")
+                continue
+        
+        # Log what we collected
+        if hasattr(self, 'logger'):
+            self.logger.info(f"Collected {len(all_controllers)} controllers with PCI IDs (following Perl module approach)")
+        
+        return all_controllers if all_controllers else []
 
     def _collect_windows_enriched(self, categories: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -762,6 +1177,9 @@ class InventoryTask(BaseTask):
             'security': ('security', self.collect_security_info),
             'shares': ('shares', self.collect_shares_info),
             'power': ('power', self.collect_power_info),
+            'ports': ('ports', self.collect_ports_info),
+            'controllers': ('controllers', self.collect_controllers_info),
+            'monitors': ('monitors', self.collect_monitors_info),
         }
         
         # Collect requested categories
@@ -777,9 +1195,1015 @@ class InventoryTask(BaseTask):
         return data
    
     def _send_to_server(self, data: Dict):
-        """Send inventory to server"""
+        """Send inventory to server using proper GLPI protocol"""
         if self.logger:
             self.logger.info(f"Sending inventory to {self.target.get_name()}")
+        
+        try:
+            # Import proper GLPI HTTP Client
+            from GLPI.Agent.HTTP.Client.GLPI import GLPIHTTPClient
+            try:
+                from GLPI.Agent.Protocol.Message import ProtocolMessage
+            except ImportError:
+                # Fallback: try to import it when needed
+                ProtocolMessage = None
+            
+            # Create GLPI HTTP client with proper agent ID (must be valid UUID)
+            # Check if deviceid is a valid UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+            agent_id = self.deviceid
+            try:
+                # Try to parse as UUID to validate format
+                import uuid as uuid_module
+                if agent_id:
+                    uuid_module.UUID(str(agent_id))
+                    if self.logger:
+                        self.logger.debug(f"Using deviceid as agentid: {agent_id}")
+                else:
+                    raise ValueError("No deviceid")
+            except (ValueError, AttributeError):
+                # Not a valid UUID, generate a new one
+                agent_id = str(uuid.uuid4())
+                if self.logger:
+                    self.logger.debug(f"Generated new UUID agentid: {agent_id}")
+            
+            client = GLPIHTTPClient(
+                logger=self.logger,
+                agentid=agent_id
+            )
+            
+            # Transform data to proper GLPI format with UPPERCASE sections
+            # Extract Windows enriched data if available
+            windows_data = data.get('windows', {})
+            hw_data = data.get('hardware', {})
+            hw_summary = windows_data.get('hardware_summary', {})
+            
+            # Build GLPI content with required UPPERCASE sections
+            glpi_content = {
+                'VERSIONCLIENT': AGENT_STRING,
+            }
+            
+            # HARDWARE section - Only allowed fields per schema
+            glpi_content['HARDWARE'] = {
+                'NAME': hw_data.get('node', socket.gethostname()),
+                'VMSYSTEM': 'Physical',
+            }
+            
+            # Add memory if available
+            if hw_data.get('memory_total_gb'):
+                glpi_content['HARDWARE']['MEMORY'] = int(hw_data.get('memory_total_gb', 0) * 1024)
+            
+            # Add chassis type if available
+            chassis_types = hw_summary.get('chassis_types', [])
+            if chassis_types and len(chassis_types) > 0:
+                glpi_content['HARDWARE']['CHASSIS_TYPE'] = str(chassis_types[0])
+            
+            # BIOS section - From hardware_summary
+            glpi_content['BIOS'] = {}
+            if hw_summary:
+                if hw_summary.get('manufacturer'): 
+                    glpi_content['BIOS']['SMANUFACTURER'] = hw_summary['manufacturer']
+                    glpi_content['BIOS']['BMANUFACTURER'] = hw_summary.get('bios_manufacturer') or hw_summary['manufacturer']
+                if hw_summary.get('model'): 
+                    glpi_content['BIOS']['SMODEL'] = hw_summary['model']
+                if hw_summary.get('serial_number'): 
+                    glpi_content['BIOS']['SSN'] = hw_summary['serial_number']
+                if hw_summary.get('bios_version'): 
+                    glpi_content['BIOS']['BVERSION'] = hw_summary['bios_version']
+                # BIOS Release Date (format: YYYY-MM-DD)
+                if hw_summary.get('bios_release_date'):
+                    release_date = hw_summary['bios_release_date']
+                    try:
+                        # Handle different date formats
+                        if isinstance(release_date, str):
+                            # Check for JSON date format: /Date(1699488000000)/
+                            import re
+                            json_date_match = re.search(r'/Date\((\d+)\)/', release_date)
+                            if json_date_match:
+                                # Milliseconds since epoch
+                                timestamp_ms = int(json_date_match.group(1))
+                                from datetime import datetime
+                                dt = datetime.fromtimestamp(timestamp_ms / 1000.0)
+                                glpi_content['BIOS']['BDATE'] = dt.strftime('%Y-%m-%d')
+                            else:
+                                # WMI date format: YYYYMMDDHHMMSS.000000+000
+                                # Remove any non-digit characters and extract date
+                                date_str = ''.join(c for c in release_date if c.isdigit())
+                                if len(date_str) >= 8:
+                                    year = date_str[0:4]
+                                    month = date_str[4:6]
+                                    day = date_str[6:8]
+                                    # Validate date parts
+                                    if year.isdigit() and month.isdigit() and day.isdigit():
+                                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                                            # GLPI expects YYYY-MM-DD format
+                                            glpi_content['BIOS']['BDATE'] = f"{year}-{month}-{day}"
+                        elif hasattr(release_date, 'strftime'):
+                            # datetime object
+                            glpi_content['BIOS']['BDATE'] = release_date.strftime('%Y-%m-%d')
+                        elif isinstance(release_date, (int, float)):
+                            # Timestamp (seconds or milliseconds)
+                            from datetime import datetime
+                            if release_date > 1e10:  # Milliseconds
+                                dt = datetime.fromtimestamp(release_date / 1000.0)
+                            else:  # Seconds
+                                dt = datetime.fromtimestamp(release_date)
+                            glpi_content['BIOS']['BDATE'] = dt.strftime('%Y-%m-%d')
+                    except Exception as e:
+                        # Skip if date parsing fails
+                        pass
+                if hw_summary.get('baseboard', {}).get('product'):
+                    glpi_content['BIOS']['MMODEL'] = hw_summary['baseboard']['product']
+                if hw_summary.get('baseboard', {}).get('serial'):
+                    glpi_content['BIOS']['MSN'] = hw_summary['baseboard']['serial']
+            
+            # OPERATINGSYSTEM section
+            os_data = windows_data.get('operating_system', {})
+            glpi_content['OPERATINGSYSTEM'] = {
+                'NAME': 'Windows',
+                'FULL_NAME': os_data.get('caption', 'Windows'),
+                'VERSION': os_data.get('version', hw_data.get('version', '')),
+                'ARCH': os_data.get('architecture', platform.machine()),
+                'FQDN': data.get('network', {}).get('fqdn', socket.getfqdn()),
+            }
+            if os_data.get('build_number'):
+                glpi_content['OPERATINGSYSTEM']['KERNEL_VERSION'] = os_data['build_number']
+            
+            # CPUS - Map from Windows CPU data
+            cpu_data = windows_data.get('cpu', {})
+            if cpu_data and isinstance(cpu_data, dict):
+                # Use BaseClockSpeed if available, otherwise CurrentClockSpeed, fallback to MaxClockSpeed
+                speed = cpu_data.get('BaseClockSpeed') or cpu_data.get('CurrentClockSpeed') or cpu_data.get('MaxClockSpeed', 0)
+                glpi_content['CPUS'] = [{
+                    'NAME': cpu_data.get('Name', ''),
+                    'CORE': cpu_data.get('NumberOfCores', 0),
+                    'THREAD': cpu_data.get('NumberOfLogicalProcessors', 0),
+                    'SPEED': speed,
+                }]
+            
+            # MEMORIES - Map from Windows memory modules
+            memory_data = windows_data.get('memory', {})
+            memory_modules = memory_data.get('modules', [])
+            if memory_modules:
+                glpi_content['MEMORIES'] = []
+                for mem in memory_modules:
+                    if isinstance(mem, dict):
+                        mem_entry = {}
+                        # Capacity in MB
+                        if mem.get('Capacity'): 
+                            mem_entry['CAPACITY'] = int(mem['Capacity'] / (1024*1024))
+                        if mem.get('Manufacturer'): 
+                            mem_entry['MANUFACTURER'] = str(mem['Manufacturer']).strip()
+                        if mem.get('SerialNumber'): 
+                            mem_entry['SERIALNUMBER'] = str(mem['SerialNumber']).strip()
+                        if mem.get('PartNumber'): 
+                            mem_entry['MODEL'] = str(mem['PartNumber']).strip()
+                        if mem.get('Speed'): 
+                            mem_entry['SPEED'] = str(mem['Speed'])
+                        if mem.get('BankLabel'): 
+                            mem_entry['CAPTION'] = mem['BankLabel']
+                        if mem_entry:
+                            glpi_content['MEMORIES'].append(mem_entry)
+            
+            # STORAGES - Map from Windows physical disks
+            storage_data = windows_data.get('storage', {})
+            physical_disks = storage_data.get('physical_disks', [])
+            # Normalize to list
+            if not isinstance(physical_disks, list):
+                physical_disks = [physical_disks] if physical_disks else []
+            
+            if physical_disks:
+                glpi_content['STORAGES'] = []
+                for disk in physical_disks:
+                    if isinstance(disk, dict):
+                        storage_entry = {
+                            'NAME': disk.get('Model', ''),
+                            'MODEL': disk.get('Model', ''),
+                            'DISKSIZE': int(disk.get('Size', 0) / (1024*1024)) if disk.get('Size') else 0,
+                        }
+                        # Add interface and type
+                        if disk.get('InterfaceType'):
+                            storage_entry['INTERFACE'] = str(disk.get('InterfaceType', '')).strip()
+                        if disk.get('MediaType'):
+                            storage_entry['TYPE'] = str(disk.get('MediaType', '')).strip()
+                        # Add serial number if available (use SERIAL instead of SERIALNUMBER per schema)
+                        if disk.get('SerialNumber'):
+                            serial = str(disk.get('SerialNumber', '')).strip()
+                            if serial and serial.upper() != 'NONE' and serial.upper() != 'TO BE FILLED BY O.E.M.':
+                                storage_entry['SERIAL'] = serial
+                        if storage_entry.get('NAME'):  # Only add if has at least a name
+                            glpi_content['STORAGES'].append(storage_entry)
+            
+            # DRIVES - Map from storage volumes
+            volumes = storage_data.get('volumes', [])
+            if volumes:
+                glpi_content['DRIVES'] = []
+                for vol in volumes:
+                    if isinstance(vol, dict):
+                        drive_entry = {
+                            'LETTER': vol.get('DriveLetter', ''),
+                            'LABEL': vol.get('Label', ''),
+                            'FILESYSTEM': vol.get('FileSystem', ''),
+                            'TOTAL': int(vol.get('Capacity', 0) / (1024*1024)) if vol.get('Capacity') else 0,
+                            'FREE': int(vol.get('FreeSpace', 0) / (1024*1024)) if vol.get('FreeSpace') else 0,
+                        }
+                        if drive_entry.get('LETTER'):
+                            glpi_content['DRIVES'].append(drive_entry)
+            
+            # VIDEOS - Map from Windows video data
+            video_data = windows_data.get('video', {})
+            gpus = video_data.get('gpus', []) if isinstance(video_data, dict) else []
+            if not gpus and isinstance(video_data, list):
+                gpus = video_data
+            if gpus:
+                glpi_content['VIDEOS'] = []
+                if not isinstance(gpus, list):
+                    gpus = [gpus]
+                for vid in gpus:
+                    if isinstance(vid, dict):
+                        vid_entry = {}
+                        if vid.get('Name'): 
+                            vid_entry['NAME'] = str(vid['Name']).strip()
+                        if vid.get('AdapterRAM'): 
+                            vid_entry['MEMORY'] = int(vid['AdapterRAM'] / (1024*1024))
+                        if vid.get('VideoProcessor'): 
+                            vid_entry['CHIPSET'] = str(vid['VideoProcessor']).strip()
+                        if vid_entry.get('NAME'):
+                            glpi_content['VIDEOS'].append(vid_entry)
+            
+            # NETWORKS - Map from Windows network data
+            network_data = windows_data.get('network_detail', {})
+            if network_data and isinstance(network_data, dict):
+                glpi_content['NETWORKS'] = []
+                
+                # Get adapters and config lists
+                adapters = network_data.get('adapters', [])
+                configs = network_data.get('config', [])
+                net_adapters = network_data.get('net_adapters', [])  # Get-NetAdapter data with LinkSpeed
+                
+                # Normalize to lists
+                if not isinstance(adapters, list):
+                    adapters = [adapters] if adapters else []
+                if not isinstance(configs, list):
+                    configs = [configs] if configs else []
+                if not isinstance(net_adapters, list):
+                    net_adapters = [net_adapters] if net_adapters else []
+                
+                # Create a lookup by MAC address for configs
+                config_by_mac = {}
+                for cfg in configs:
+                    if isinstance(cfg, dict) and cfg.get('MACAddress'):
+                        mac = cfg['MACAddress'].upper().replace('-', ':').replace(' ', '')
+                        config_by_mac[mac] = cfg
+                
+                # Create a lookup by MAC address for LinkSpeed from Get-NetAdapter
+                speed_by_mac = {}
+                for net_adapter in net_adapters:
+                    if isinstance(net_adapter, dict) and net_adapter.get('MACAddress'):
+                        mac = net_adapter['MACAddress'].upper().replace('-', ':').replace(' ', '')
+                        link_speed = net_adapter.get('LinkSpeed')
+                        if link_speed:
+                            speed_by_mac[mac] = link_speed
+                
+                # Process each adapter
+                for adapter in adapters:
+                    if not isinstance(adapter, dict):
+                        continue
+                    
+                    # Get MAC address and normalize it
+                    mac = adapter.get('MACAddress', '')
+                    if mac:
+                        mac_normalized = mac.upper().replace('-', ':').replace(' ', '')
+                    else:
+                        mac_normalized = None
+                    
+                    # Find matching config by MAC
+                    config = config_by_mac.get(mac_normalized, {}) if mac_normalized else {}
+                    
+                    # Build network entry
+                    net_entry = {}
+                    
+                    # Description/Name (prefer config Description, fallback to adapter Name)
+                    description = config.get('Description') or adapter.get('Name', '')
+                    # If still no description, try to build one from adapter type
+                    if not description:
+                        adapter_type_id = adapter.get('AdapterTypeID')
+                        if adapter_type_id == 0:
+                            description = 'Ethernet'
+                        elif adapter_type_id == 9:
+                            description = 'Token Ring'
+                        elif adapter_type_id == 6:
+                            description = 'FDDI'
+                        else:
+                            description = adapter.get('Name', 'Network Adapter')
+                    if description:
+                        net_entry['DESCRIPTION'] = str(description).strip()
+                    
+                    # Detect adapter type (Bluetooth, Ethernet, WiFi, etc.)
+                    adapter_name = str(adapter.get('Name', '')).upper()
+                    pnp_id = str(adapter.get('PNPDeviceID', '')).upper()
+                    if 'BLUETOOTH' in adapter_name or 'BTHENUM' in pnp_id:
+                        net_entry['TYPE'] = 'bluetooth'
+                    elif 'WIRELESS' in adapter_name or 'WIFI' in adapter_name or '802.11' in adapter_name:
+                        net_entry['TYPE'] = 'wifi'
+                    elif 'ETHERNET' in adapter_name or adapter.get('AdapterTypeID') == 0:
+                        net_entry['TYPE'] = 'ethernet'
+                    # Note: GLPI schema requires TYPE to be one of: ethernet, wifi, infiniband, aggregate, alias, dialup, loopback, bridge, fibrechannel, bluetooth
+                    
+                    # MAC Address - Protocol layer renames MACADDR to MAC
+                    if mac and mac_normalized and len(mac_normalized) > 0:
+                        # Format: XX:XX:XX:XX:XX:XX (17 chars) or XXXXXXXXXXXX (12 chars)
+                        if len(mac_normalized) == 17 or len(mac_normalized) == 12:
+                            net_entry['MAC'] = mac_normalized
+                    
+                    # Status (convert numeric to text)
+                    status = adapter.get('NetConnectionStatus')
+                    if status is not None:
+                        # NetConnectionStatus: 0=Disconnected, 2=Connected, etc.
+                        status_map = {0: 'down', 2: 'up', 3: 'disconnecting', 4: 'connecting', 7: 'up'}
+                        net_entry['STATUS'] = status_map.get(status, 'unknown')
+                    
+                    # IP Address (from config)
+                    ip_address = config.get('IPAddress')
+                    if ip_address:
+                        # IPAddress can be a list
+                        if isinstance(ip_address, list) and len(ip_address) > 0:
+                            net_entry['IPADDRESS'] = str(ip_address[0]).strip()
+                        elif ip_address:
+                            net_entry['IPADDRESS'] = str(ip_address).strip()
+                    
+                    # IP Subnet/Mask (from config)
+                    ip_subnet = config.get('IPSubnet')
+                    if ip_subnet:
+                        if isinstance(ip_subnet, list) and len(ip_subnet) > 0:
+                            net_entry['IPMASK'] = str(ip_subnet[0]).strip()
+                        elif ip_subnet:
+                            net_entry['IPMASK'] = str(ip_subnet).strip()
+                    
+                    # Default Gateway (from config)
+                    gateway = config.get('DefaultIPGateway')
+                    if gateway:
+                        if isinstance(gateway, list) and len(gateway) > 0:
+                            net_entry['IPGATEWAY'] = str(gateway[0]).strip()
+                        elif gateway:
+                            net_entry['IPGATEWAY'] = str(gateway).strip()
+                    
+                    # Speed - try multiple sources
+                    speed_value = None
+                    
+                    # First try LinkSpeed from Get-NetAdapter (most reliable for active adapters)
+                    if mac_normalized and mac_normalized in speed_by_mac:
+                        link_speed = speed_by_mac[mac_normalized]
+                        # LinkSpeed format is like "1 Gbps" or "100 Mbps"
+                        if isinstance(link_speed, str):
+                            # Parse "1 Gbps" -> 1000, "100 Mbps" -> 100
+                            try:
+                                parts = link_speed.upper().strip().split()
+                                if len(parts) >= 2:
+                                    value = float(parts[0])
+                                    unit = parts[1]
+                                    if 'GBPS' in unit or 'G' in unit:
+                                        speed_value = int(value * 1000)  # Convert Gbps to Mbps
+                                    elif 'MBPS' in unit or 'M' in unit:
+                                        speed_value = int(value)
+                                    else:
+                                        # Assume bits per second, convert to Mbps
+                                        speed_value = int(value / 1000000)
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    # Fallback to Speed from Win32_NetworkAdapter
+                    if speed_value is None:
+                        speed = adapter.get('Speed')
+                        if speed:
+                            # Speed is in bits per second, convert to Mbps
+                            try:
+                                speed_mbps = int(speed) / 1000000
+                                speed_value = int(speed_mbps)
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    # Set SPEED if we have a valid value
+                    if speed_value and speed_value > 0:
+                        net_entry['SPEED'] = str(speed_value)  # Must be string
+                    
+                    # Only add if we have at least a description
+                    # Always add network entry if we have adapter data (even without description/MAC)
+                    # This ensures all physical adapters are reported
+                    if adapter.get('Name') or net_entry.get('DESCRIPTION') or net_entry.get('MAC'):
+                        # If no description yet, use adapter name
+                        if not net_entry.get('DESCRIPTION') and adapter.get('Name'):
+                            net_entry['DESCRIPTION'] = str(adapter.get('Name', '')).strip()
+                        glpi_content['NETWORKS'].append(net_entry)
+            
+            # PORTS - Map from Windows port data
+            ports_data = windows_data.get('ports', {})
+            if ports_data:
+                glpi_content['PORTS'] = []
+                
+                # Process COM ports (serial)
+                com_ports = ports_data.get('com_ports', [])
+                if not isinstance(com_ports, list):
+                    com_ports = [com_ports] if com_ports else []
+                for port in com_ports:
+                    if isinstance(port, dict):
+                        port_entry = {
+                            'NAME': port.get('Name', port.get('DeviceID', '')),
+                            'DESCRIPTION': port.get('Description', ''),
+                            'TYPE': 'serial',
+                        }
+                        if port_entry.get('NAME'):
+                            glpi_content['PORTS'].append(port_entry)
+                
+                # Process LPT ports (parallel)
+                lpt_ports = ports_data.get('lpt_ports', [])
+                if not isinstance(lpt_ports, list):
+                    lpt_ports = [lpt_ports] if lpt_ports else []
+                for port in lpt_ports:
+                    if isinstance(port, dict):
+                        port_entry = {
+                            'NAME': port.get('Name', port.get('DeviceID', '')),
+                            'DESCRIPTION': port.get('Description', ''),
+                            'TYPE': 'parallel',
+                        }
+                        if port_entry.get('NAME'):
+                            glpi_content['PORTS'].append(port_entry)
+                
+                # Process USB controllers (as USB ports)
+                usb_controllers = ports_data.get('usb_controllers', [])
+                if not isinstance(usb_controllers, list):
+                    usb_controllers = [usb_controllers] if usb_controllers else []
+                for port in usb_controllers:
+                    if isinstance(port, dict):
+                        port_entry = {
+                            'NAME': port.get('Name', port.get('DeviceID', '')),
+                            'DESCRIPTION': port.get('Description', ''),
+                            'TYPE': 'usb',
+                        }
+                        if port_entry.get('NAME'):
+                            glpi_content['PORTS'].append(port_entry)
+            
+            # SOFTWARES - Map from Windows software list
+            software_data = windows_data.get('software', [])
+            if software_data:
+                glpi_content['SOFTWARES'] = []
+                for sw in software_data[:100]:  # Limit to first 100 to avoid huge payload
+                    if isinstance(sw, dict):
+                        sw_entry = {}
+                        # Only add non-null, non-empty values
+                        if sw.get('DisplayName'):
+                            sw_entry['NAME'] = sw['DisplayName']
+                        if sw.get('DisplayVersion'):
+                            sw_entry['VERSION'] = sw['DisplayVersion']
+                        if sw.get('Publisher'):
+                            sw_entry['PUBLISHER'] = sw['Publisher']
+                        if sw.get('EstimatedSize'):
+                            sw_entry['FILESIZE'] = sw['EstimatedSize']
+                        # Only add if has at least a name
+                        if sw_entry.get('NAME'):
+                            glpi_content['SOFTWARES'].append(sw_entry)
+            
+            # BATTERIES - Map from Windows battery data
+            power_data = windows_data.get('power', {})
+            batteries = power_data.get('batteries', []) if power_data else []
+            if batteries:
+                glpi_content['BATTERIES'] = []
+                if not isinstance(batteries, list):
+                    batteries = [batteries]
+                for bat in batteries:
+                    if isinstance(bat, dict):
+                        bat_entry = {}
+                        battery_name = str(bat.get('Name', '')).strip() if bat.get('Name') else ''
+                        # Get battery percentage for display
+                        battery_percentage = None
+                        if bat.get('EstimatedChargeRemaining') is not None:
+                            try:
+                                percentage = int(bat['EstimatedChargeRemaining'])
+                                if 0 <= percentage <= 100:
+                                    battery_percentage = percentage
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        # Calculate battery health/wear percentage
+                        battery_health = None
+                        health_info = []
+                        design_capacity = bat.get('DesignCapacity')
+                        full_charge_capacity = bat.get('FullChargeCapacity')
+                        
+                        if design_capacity and full_charge_capacity:
+                            try:
+                                design = int(design_capacity)
+                                full = int(full_charge_capacity)
+                                if design > 0:
+                                    # Health = (current full charge / design capacity) * 100
+                                    health_pct = int((full / design) * 100)
+                                    if 0 <= health_pct <= 100:
+                                        battery_health = health_pct
+                                        health_info.append(f"Health: {health_pct}%")
+                            except (ValueError, TypeError, ZeroDivisionError):
+                                pass
+                        
+                        # Get cycle count if available
+                        cycle_count = bat.get('CycleCount')
+                        if cycle_count is not None:
+                            try:
+                                cycles = int(cycle_count)
+                                health_info.append(f"Cycles: {cycles}")
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        # Build battery name with charge percentage (e.g., "Primary (85%)")
+                        if battery_name:
+                            if battery_percentage is not None:
+                                bat_entry['NAME'] = f"{battery_name} ({battery_percentage}%)"
+                            else:
+                                bat_entry['NAME'] = battery_name
+                        else:
+                            if battery_percentage is not None:
+                                bat_entry['NAME'] = f"Battery ({battery_percentage}%)"
+                            else:
+                                bat_entry['NAME'] = "Battery"
+                        
+                        # CAPACITY - Design capacity
+                        if bat.get('DesignCapacity'):
+                            bat_entry['CAPACITY'] = int(bat['DesignCapacity'])
+                        
+                        # REAL_CAPACITY - Send as integer (GLPI schema expects integer)
+                        # The formatted display "48 230 (85%)" is handled by GLPI's display logic
+                        if bat.get('FullChargeCapacity'):
+                            try:
+                                full_capacity = int(bat['FullChargeCapacity'])
+                                bat_entry['REAL_CAPACITY'] = full_capacity
+                            except (ValueError, TypeError):
+                                pass
+                        if bat.get('DesignVoltage'):
+                            bat_entry['VOLTAGE'] = int(bat['DesignVoltage'])
+                        if bat.get('Chemistry'):
+                            # Chemistry: 1=Other, 2=Unknown, 3=Lead Acid, 4=Nickel Cadmium, 
+                            # 5=Nickel Metal Hydride, 6=Lithium-ion, 7=Zinc air, 8=Lithium Polymer
+                            chem_map = {1: 'Other', 2: 'Unknown', 3: 'Lead Acid', 4: 'NiCd',
+                                       5: 'NiMH', 6: 'Li-ion', 7: 'Zinc air', 8: 'LiP'}
+                            chem_id = bat.get('Chemistry')
+                            if chem_id and chem_id in chem_map:
+                                bat_entry['CHEMISTRY'] = chem_map[chem_id]
+                        if bat.get('DeviceID'):
+                            # Try to extract serial from DeviceID
+                            device_id = str(bat.get('DeviceID', ''))
+                            if device_id:
+                                bat_entry['SERIAL'] = device_id
+                        # Add manufacturer if available
+                        if bat.get('ManufactureName'):
+                            bat_entry['MANUFACTURER'] = str(bat['ManufactureName']).strip()
+                        # Add manufacture date if available
+                        if bat.get('ManufactureDate'):
+                            manuf_date = bat.get('ManufactureDate')
+                            try:
+                                # WMI date format: YYYYMMDDHHMMSS.000000+000
+                                if isinstance(manuf_date, str):
+                                    date_str = ''.join(c for c in manuf_date if c.isdigit())
+                                    if len(date_str) >= 8:
+                                        year = date_str[0:4]
+                                        month = date_str[4:6]
+                                        day = date_str[6:8]
+                                        if year.isdigit() and month.isdigit() and day.isdigit():
+                                            if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                                                bat_entry['DATE'] = f"{year}-{month}-{day}"
+                            except Exception:
+                                pass
+                        if bat_entry.get('NAME'):
+                            glpi_content['BATTERIES'].append(bat_entry)
+            
+            # SOUNDS - Map from Windows audio/sound device data
+            audio_data = windows_data.get('audio', [])
+            if audio_data:
+                glpi_content['SOUNDS'] = []
+                if not isinstance(audio_data, list):
+                    audio_data = [audio_data]
+                for sound in audio_data:
+                    if isinstance(sound, dict):
+                        sound_entry = {}
+                        if sound.get('Name'):
+                            sound_entry['NAME'] = str(sound['Name']).strip()
+                        if sound.get('Manufacturer'):
+                            sound_entry['MANUFACTURER'] = str(sound['Manufacturer']).strip()
+                        if sound.get('Status'):
+                            sound_entry['DESCRIPTION'] = str(sound['Status']).strip()
+                        if sound_entry.get('NAME'):
+                            glpi_content['SOUNDS'].append(sound_entry)
+            
+            # PRINTERS - Map from Windows printer data
+            printers_data = windows_data.get('printers', [])
+            if printers_data:
+                glpi_content['PRINTERS'] = []
+                if not isinstance(printers_data, list):
+                    printers_data = [printers_data]
+                for printer in printers_data:
+                    if isinstance(printer, dict):
+                        printer_entry = {}
+                        if printer.get('Name'):
+                            printer_entry['NAME'] = str(printer['Name']).strip()
+                        if printer.get('DriverName'):
+                            printer_entry['DRIVER'] = str(printer['DriverName']).strip()
+                        if printer.get('PortName'):
+                            printer_entry['PORT'] = str(printer['PortName']).strip()
+                        # Check if printer is offline
+                        work_offline = printer.get('WorkOffline')
+                        if work_offline is not None:
+                            # WorkOffline: True = offline, False = online
+                            printer_entry['STATUS'] = 'Offline' if work_offline else 'Idle'
+                        # Check if it's the default printer
+                        is_default = printer.get('Default')
+                        if is_default and is_default:
+                            if printer_entry.get('NAME'):
+                                printer_entry['NAME'] = f"{printer_entry['NAME']} (Default)"
+                        if printer_entry.get('NAME'):
+                            glpi_content['PRINTERS'].append(printer_entry)
+            
+            # MONITORS - Map from Windows monitor data
+            monitors_data = windows_data.get('monitors', {})
+            glpi_content['MONITORS'] = []
+            
+            if monitors_data and isinstance(monitors_data, dict):
+                # VideoOutputTechnology port mapping
+                ports_map = {
+                    '-1': 'Other',
+                    '0': 'VGA',
+                    '1': 'S-Video',
+                    '2': 'Composite',
+                    '3': 'YUV',
+                    '4': 'DVI',
+                    '5': 'HDMI',
+                    '6': 'LVDS',
+                    '8': 'D-Jpn',
+                    '9': 'SDI',
+                    '10': 'DisplayPort',
+                    '11': 'eDisplayPort',
+                    '12': 'UDI',
+                    '13': 'eUDI',
+                    '14': 'SDTV',
+                    '15': 'Miracast'
+                }
+                
+                # Get desktop monitors
+                desktop_monitors = monitors_data.get('desktop_monitors', [])
+                if not isinstance(desktop_monitors, list):
+                    desktop_monitors = [desktop_monitors] if desktop_monitors else []
+                
+                # Get monitor connections (for port type)
+                monitor_connections = monitors_data.get('monitor_connections', [])
+                if not isinstance(monitor_connections, list):
+                    monitor_connections = [monitor_connections] if monitor_connections else []
+                
+                # Get monitor IDs (EDID data)
+                monitor_ids = monitors_data.get('monitor_ids', [])
+                if not isinstance(monitor_ids, list):
+                    monitor_ids = [monitor_ids] if monitor_ids else []
+                
+                # Create lookup maps
+                connection_by_instance = {}
+                for conn in monitor_connections:
+                    if isinstance(conn, dict) and conn.get('InstanceName'):
+                        instance_name = str(conn.get('InstanceName', '')).rsplit('_', 1)[0]
+                        connection_by_instance[instance_name] = conn
+                
+                id_by_instance = {}
+                for mid in monitor_ids:
+                    if isinstance(mid, dict) and mid.get('InstanceName'):
+                        instance_name = str(mid.get('InstanceName', '')).rsplit('_', 1)[0]
+                        id_by_instance[instance_name] = mid
+                
+                # Process each desktop monitor
+                for monitor in desktop_monitors:
+                    if not isinstance(monitor, dict):
+                        continue
+                    
+                    monitor_entry = {}
+                    
+                    # Get PNPDeviceID to match with connections and IDs
+                    pnp_id = monitor.get('PNPDeviceID', '')
+                    instance_name = pnp_id.rsplit('\\', 1)[0] if '\\' in pnp_id else pnp_id
+                    
+                    # Get name/caption
+                    if monitor.get('Caption'):
+                        monitor_entry['NAME'] = str(monitor['Caption']).strip()
+                        monitor_entry['CAPTION'] = str(monitor['Caption']).strip()
+                    
+                    # Get manufacturer
+                    if monitor.get('MonitorManufacturer'):
+                        monitor_entry['MANUFACTURER'] = str(monitor['MonitorManufacturer']).strip()
+                    
+                    # Get connection type (port) from WMIMonitorConnectionParams
+                    if instance_name in connection_by_instance:
+                        conn = connection_by_instance[instance_name]
+                        video_tech = str(conn.get('VideoOutputTechnology', ''))
+                        if video_tech in ports_map:
+                            monitor_entry['PORT'] = ports_map[video_tech]
+                    
+                    # Get EDID data from WmiMonitorID
+                    if instance_name in id_by_instance:
+                        mid = id_by_instance[instance_name]
+                        if mid.get('ManufacturerID'):
+                            # If we don't have manufacturer yet, use this
+                            if not monitor_entry.get('MANUFACTURER'):
+                                monitor_entry['MANUFACTURER'] = str(mid['ManufacturerID']).strip()
+                        if mid.get('ProductCodeID'):
+                            # Product code can help identify model
+                            if not monitor_entry.get('NAME'):
+                                monitor_entry['NAME'] = str(mid['ProductCodeID']).strip()
+                        if mid.get('SerialNumberID'):
+                            monitor_entry['SERIAL'] = str(mid['SerialNumberID']).strip()
+                    
+                    # Only add if we have at least a name or manufacturer
+                    if monitor_entry.get('NAME') or monitor_entry.get('MANUFACTURER'):
+                        glpi_content['MONITORS'].append(monitor_entry)
+                
+                # If no desktop monitors found but we have connections, create entries from connections
+                if len(glpi_content['MONITORS']) == 0 and monitor_connections:
+                    for conn in monitor_connections:
+                        if not isinstance(conn, dict) or not conn.get('InstanceName'):
+                            continue
+                        
+                        monitor_entry = {}
+                        instance_name = str(conn.get('InstanceName', '')).rsplit('_', 1)[0]
+                        
+                        # Get connection type (port)
+                        video_tech = str(conn.get('VideoOutputTechnology', ''))
+                        if video_tech in ports_map:
+                            monitor_entry['PORT'] = ports_map[video_tech]
+                        
+                        # Try to get EDID data from WmiMonitorID
+                        if instance_name in id_by_instance:
+                            mid = id_by_instance[instance_name]
+                            if mid.get('ManufacturerID'):
+                                monitor_entry['MANUFACTURER'] = str(mid['ManufacturerID']).strip()
+                            if mid.get('ProductCodeID'):
+                                monitor_entry['NAME'] = str(mid['ProductCodeID']).strip()
+                                monitor_entry['CAPTION'] = str(mid['ProductCodeID']).strip()
+                            if mid.get('SerialNumberID'):
+                                monitor_entry['SERIAL'] = str(mid['SerialNumberID']).strip()
+                        
+                        # If we still don't have a name, use a generic one based on port
+                        if not monitor_entry.get('NAME'):
+                            port_name = monitor_entry.get('PORT', 'Display')
+                            monitor_entry['NAME'] = f"{port_name} Display"
+                            monitor_entry['CAPTION'] = f"{port_name} Display"
+                        
+                        # Only add if we have at least a name or manufacturer
+                        if monitor_entry.get('NAME') or monitor_entry.get('MANUFACTURER'):
+                            glpi_content['MONITORS'].append(monitor_entry)
+                
+                # If still no monitors but we have monitor IDs, create entries from IDs
+                if len(glpi_content['MONITORS']) == 0 and monitor_ids:
+                    for mid in monitor_ids:
+                        if not isinstance(mid, dict) or not mid.get('InstanceName'):
+                            continue
+                        
+                        monitor_entry = {}
+                        
+                        if mid.get('ManufacturerID'):
+                            monitor_entry['MANUFACTURER'] = str(mid['ManufacturerID']).strip()
+                        if mid.get('ProductCodeID'):
+                            monitor_entry['NAME'] = str(mid['ProductCodeID']).strip()
+                            monitor_entry['CAPTION'] = str(mid['ProductCodeID']).strip()
+                        if mid.get('SerialNumberID'):
+                            monitor_entry['SERIAL'] = str(mid['SerialNumberID']).strip()
+                        
+                        # If we don't have a name, use a generic one
+                        if not monitor_entry.get('NAME'):
+                            monitor_entry['NAME'] = "Display"
+                            monitor_entry['CAPTION'] = "Display"
+                        
+                        # Only add if we have at least a name or manufacturer
+                        if monitor_entry.get('NAME') or monitor_entry.get('MANUFACTURER'):
+                            glpi_content['MONITORS'].append(monitor_entry)
+            
+            if self.logger and glpi_content.get('MONITORS'):
+                self.logger.info(f"Found {len(glpi_content['MONITORS'])} monitor(s) in collected data")
+            
+            # CONTROLLERS - Map from Windows controller/PCI device data
+            controllers_data = windows_data.get('controllers', [])
+            glpi_content['CONTROLLERS'] = []
+            
+            if controllers_data:
+                # Normalize to list
+                if not isinstance(controllers_data, list):
+                    controllers_list = [controllers_data] if controllers_data else []
+                else:
+                    controllers_list = controllers_data
+                
+                # Log how many controllers we found
+                self.logger.info(f"Found {len(controllers_list)} controllers in collected data")
+                
+                # Map controllers following Perl module approach
+                # Controllers should already have VENDORID and PRODUCTID from collection
+                for controller in controllers_list:
+                    if not isinstance(controller, dict):
+                        continue
+                    
+                    # Only include controllers with PCI IDs (following Perl approach)
+                    if not controller.get('VENDORID') or not controller.get('PRODUCTID'):
+                        continue
+                    
+                    ctrl_entry = {}
+                    
+                    # Use Name from controller, or try to get from PCI database
+                    name = str(controller.get('Name', '')).strip()
+                    if name:
+                        ctrl_entry['NAME'] = name
+                    
+                    # Manufacturer
+                    if controller.get('Manufacturer'):
+                        manufacturer = str(controller['Manufacturer']).strip()
+                        if manufacturer and manufacturer.upper() not in ['', 'N/A', 'UNKNOWN']:
+                            ctrl_entry['MANUFACTURER'] = manufacturer
+                    
+                    # Caption
+                    caption = controller.get('Caption') or controller.get('Description')
+                    if caption:
+                        desc = str(caption).strip()
+                        if desc:
+                            ctrl_entry['CAPTION'] = desc
+                    
+                    # PCI IDs
+                    if controller.get('VENDORID'):
+                        ctrl_entry['VENDORID'] = controller['VENDORID']
+                    if controller.get('PRODUCTID'):
+                        ctrl_entry['PRODUCTID'] = controller['PRODUCTID']
+                    if controller.get('PCISUBSYSTEMID'):
+                        ctrl_entry['PCISUBSYSTEMID'] = controller['PCISUBSYSTEMID']
+                    # Note: PNPDEVICEID is not in the CONTROLLERS schema, so we skip it
+                        
+                        # Determine TYPE from Class, Name, or Caption
+                        class_name = str(controller.get('Class', '')).upper()
+                        name_upper = name.upper()
+                        caption_upper = str(ctrl_entry.get('CAPTION', '')).upper()
+                        
+                        # More comprehensive TYPE detection
+                        if 'USB' in class_name or 'USB' in name_upper or 'USB' in caption_upper or name_upper.startswith('USB') or 'XHCI' in name_upper or 'EHCI' in name_upper or 'OHCI' in name_upper or 'UHCI' in name_upper:
+                            if 'AUDIO' in name_upper:
+                                ctrl_entry['TYPE'] = 'Audio'
+                            elif 'VIDEO' in name_upper or 'CAMERA' in name_upper:
+                                ctrl_entry['TYPE'] = 'Video'
+                            elif 'PRINT' in name_upper:
+                                ctrl_entry['TYPE'] = 'Printer'
+                            elif 'STOR' in name_upper or 'MASS' in name_upper:
+                                ctrl_entry['TYPE'] = 'Storage'
+                            elif 'HID' in name_upper or 'HUMAN' in name_upper:
+                                ctrl_entry['TYPE'] = 'Input'
+                            elif 'SERIAL' in name_upper or 'SER' in name_upper:
+                                ctrl_entry['TYPE'] = 'Serial'
+                            elif 'HUB' in name_upper:
+                                ctrl_entry['TYPE'] = 'USB Hub'
+                            elif 'BLUETOOTH' in name_upper or 'BTH' in name_upper:
+                                ctrl_entry['TYPE'] = 'Bluetooth'
+                            elif 'NETWORK' in name_upper or 'RNDIS' in name_upper:
+                                ctrl_entry['TYPE'] = 'Network controller'
+                            else:
+                                ctrl_entry['TYPE'] = 'USB'
+                        elif 'PCI' in class_name or 'PCI' in name_upper or 'PCI EXPRESS' in name_upper or name_upper.startswith('PCI'):
+                            if 'ROOT PORT' in name_upper:
+                                ctrl_entry['TYPE'] = 'PCI Express Root Port'
+                            elif 'IDE' in name_upper:
+                                ctrl_entry['TYPE'] = 'IDE'
+                            else:
+                                ctrl_entry['TYPE'] = 'PCI'
+                        elif 'SCSI' in class_name or 'SCSI' in name_upper:
+                            ctrl_entry['TYPE'] = 'SCSI'
+                        elif 'IDE' in class_name or 'IDE' in name_upper or 'intelide' in name_upper:
+                            ctrl_entry['TYPE'] = 'IDE'
+                        elif 'DISPLAY' in class_name or 'VIDEO' in class_name or 'GRAPHICS' in name_upper or 'usbvideo' in name_upper:
+                            ctrl_entry['TYPE'] = 'Display'
+                        elif 'NETWORK' in class_name or 'ETHERNET' in name_upper or 'NETWORK' in name_upper or 'RNDIS' in name_upper:
+                            ctrl_entry['TYPE'] = 'Network controller'
+                        elif 'WIRELESS' in name_upper or 'WIFI' in name_upper:
+                            ctrl_entry['TYPE'] = 'Network controller'
+                        elif 'BLUETOOTH' in class_name or 'BLUETOOTH' in name_upper or 'BTH' in name_upper or 'AVRCP' in name_upper:
+                            ctrl_entry['TYPE'] = 'Bluetooth'
+                        elif 'AUDIO' in class_name or 'SOUND' in name_upper or 'AUDIO' in name_upper or 'HD AUDIO' in name_upper or 'usbaudio' in name_upper or 'IntcAudio' in name_upper or 'AcpiAudio' in name_upper:
+                            ctrl_entry['TYPE'] = 'Audio'
+                        elif 'SATA' in name_upper or 'AHCI' in name_upper or 'storahci' in name_upper or 'amdsata' in name_upper:
+                            ctrl_entry['TYPE'] = 'SATA'
+                        elif 'NVME' in name_upper or 'NVME' in caption_upper or 'stornvme' in name_upper or 'nvmedisk' in name_upper:
+                            ctrl_entry['TYPE'] = 'NVMe'
+                        elif 'SMBUS' in name_upper or 'SMBUS' in caption_upper:
+                            ctrl_entry['TYPE'] = 'SMBus'
+                        elif 'THUNDERBOLT' in name_upper or 'USB4' in name_upper:
+                            ctrl_entry['TYPE'] = 'Thunderbolt'
+                        elif 'THERMAL' in name_upper or 'ThermalFilter' in name_upper:
+                            ctrl_entry['TYPE'] = 'Thermal'
+                        elif 'HECI' in name_upper or 'MANAGEMENT' in name_upper or 'PlutonHeci' in name_upper or 'PMT' in name_upper:
+                            ctrl_entry['TYPE'] = 'Management'
+                        elif 'LPC' in name_upper or 'ESPI' in name_upper:
+                            ctrl_entry['TYPE'] = 'LPC'
+                        elif 'HOST BRIDGE' in name_upper or 'DRAM' in name_upper:
+                            ctrl_entry['TYPE'] = 'Host Bridge'
+                        elif 'BRIDGE' in name_upper or 'MsBridge' in name_upper:
+                            ctrl_entry['TYPE'] = 'Bridge'
+                        elif 'STORAGE' in name_upper or 'STOR' in name_upper:
+                            ctrl_entry['TYPE'] = 'Storage'
+                        elif 'PRINT' in name_upper:
+                            ctrl_entry['TYPE'] = 'Printer'
+                        elif 'VIDEO' in name_upper or 'CAMERA' in name_upper:
+                            ctrl_entry['TYPE'] = 'Video'
+                        else:
+                            ctrl_entry['TYPE'] = 'Other'
+                        
+                        # Try to extract manufacturer from name if not present
+                        if not ctrl_entry.get('MANUFACTURER'):
+                            if 'INTEL' in name_upper or 'intel' in name_upper:
+                                ctrl_entry['MANUFACTURER'] = 'Intel Corporation'
+                            elif 'AMD' in name_upper or 'amdsata' in name_upper:
+                                ctrl_entry['MANUFACTURER'] = 'Advanced Micro Devices, Inc.'
+                            elif 'MICROSOFT' in name_upper or 'Microsoft' in name:
+                                ctrl_entry['MANUFACTURER'] = 'Microsoft Corporation'
+                            elif 'REALTEK' in name_upper:
+                                ctrl_entry['MANUFACTURER'] = 'Realtek'
+                            elif 'NVIDIA' in name_upper:
+                                ctrl_entry['MANUFACTURER'] = 'NVIDIA Corporation'
+                        
+                        # Only add if we have at least a name
+                        if ctrl_entry.get('NAME'):
+                            glpi_content['CONTROLLERS'].append(ctrl_entry)
+            
+            # Log final count
+            self.logger.info(f"Total controllers after mapping: {len(glpi_content.get('CONTROLLERS', []))}")
+            
+            # If no controllers found, try alternative collection method
+            if len(glpi_content.get('CONTROLLERS', [])) == 0:
+                # Try getting controllers from Win32_SystemDriver directly
+                try:
+                    controllers_alt = self._ps_json('Get-CimInstance Win32_SystemDriver | Where-Object {$_.Status -eq "OK" -and ($_.Name -like "*Controller*" -or $_.Name -like "*USB*" -or $_.Name -like "*PCI*" -or $_.Name -like "*SATA*" -or $_.Name -like "*AHCI*" -or $_.Name -like "*NVMe*" -or $_.Name -like "*Thunderbolt*" -or $_.Name -like "*Audio*" -or $_.Name -like "*Network*" -or $_.Name -like "*Bluetooth*" -or $_.Name -like "*Wireless*" -or $_.Name -like "*Intel*" -or $_.Name -like "*Realtek*")} | Select-Object -First 50 Name,Description', depth=4)
+                    if controllers_alt:
+                        glpi_content['CONTROLLERS'] = []
+                        controllers_list_alt = controllers_alt if isinstance(controllers_alt, list) else [controllers_alt]
+                        for ctrl in controllers_list_alt:
+                            if isinstance(ctrl, dict) and ctrl.get('Name'):
+                                name = str(ctrl.get('Name', '')).strip()
+                                if name:
+                                    ctrl_entry_alt = {'NAME': name}
+                                    if ctrl.get('Description'):
+                                        ctrl_entry_alt['CAPTION'] = str(ctrl.get('Description', '')).strip()
+                                    # Determine type from name
+                                    name_upper = name.upper()
+                                    if 'USB' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'USB'
+                                    elif 'PCI' in name_upper or 'PCIEXPRESS' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'PCI'
+                                    elif 'SATA' in name_upper or 'AHCI' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'SATA'
+                                    elif 'NVME' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'NVMe'
+                                    elif 'THUNDERBOLT' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'Thunderbolt'
+                                    elif 'AUDIO' in name_upper or 'SOUND' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'Audio'
+                                    elif 'NETWORK' in name_upper or 'ETHERNET' in name_upper or 'WIRELESS' in name_upper or 'WIFI' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'Network controller'
+                                    elif 'BLUETOOTH' in name_upper:
+                                        ctrl_entry_alt['TYPE'] = 'Bluetooth'
+                                    else:
+                                        ctrl_entry_alt['TYPE'] = 'Other'
+                                    glpi_content['CONTROLLERS'].append(ctrl_entry_alt)
+                except Exception:
+                    pass
+            
+            # Message structure matching Perl Protocol::Inventory format
+            message_data = {
+                'action': 'inventory',
+                'deviceid': data.get('deviceid', self.deviceid),
+                'itemtype': 'Computer',
+                'content': glpi_content
+            }
+            
+            # Ensure ProtocolMessage is available
+            if ProtocolMessage is None:
+                from GLPI.Agent.Protocol.Message import ProtocolMessage
+            message = ProtocolMessage(message=message_data)
+            
+            # Send using GLPI HTTP client
+            response = client.send(
+                url=self.target.get_name(),
+                message=message
+            )
+            
+            if response:
+                if self.logger:
+                    self.logger.info("✅ Inventory successfully sent to server!")
+                return True
+            else:
+                if self.logger:
+                    self.logger.error("Failed to send inventory - no response from server")
+                return False
+                
+        except ImportError as e:
+            if self.logger:
+                self.logger.error(f"Cannot load GLPI HTTP client: {e}")
+            return False
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Unexpected error sending inventory: {e}")
+                import traceback
+                self.logger.debug(traceback.format_exc())
+            return False
    
     def _save_to_local(self, data: Dict):
         """Save inventory to local file"""
@@ -911,7 +2335,7 @@ class GLPIAgent:
             else:
                 self.logger.debug(f"target {target.id}: {target.get_type()}")
            
-            planned = target.planned_tasks(*planned_tasks)
+            planned = target.planned_tasks(planned_tasks)
            
             if planned:
                 self.logger.debug(f"Planned tasks for {target.id}: {','.join(planned)}")
@@ -1125,6 +2549,9 @@ class GLPIAgent:
     def _get_task_class(self, name: str):
         """Get task class by name"""
         if name.lower() == 'inventory':
+            # Use simple InventoryTask that works reliably
+            if self.logger:
+                self.logger.debug("Using simple InventoryTask with GLPI schema transformation")
             return InventoryTask
        
         try:

@@ -3,10 +3,10 @@
 import os
 import re
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import trim_whitespace, any
-from glpi_agent.tools.win32 import get_wmi_objects, get_registry_key
-from glpi_agent.tools.generic import get_cpus_from_dmidecode, get_canonical_manufacturer
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import trim_whitespace, any_func as any
+from GLPI.Agent.Tools.Win32 import get_wmi_objects, get_registry_key
+from GLPI.Agent.Tools.Generic import get_cpus_from_dmidecode, get_canonical_manufacturer
 
 
 class CPU(InventoryModule):

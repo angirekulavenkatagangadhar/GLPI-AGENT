@@ -218,8 +218,17 @@ class HTTPClient:
                 stream=bool(file_path)
             )
             
+            # Check for valid status code
+            status_code = getattr(response, 'status_code', None)
+            if status_code is None:
+                self.logger.error(LOG_PREFIX + "invalid response - no status code")
+                error_response = requests.Response()
+                error_response.status_code = 500
+                error_response._content = b"Invalid response object"
+                return error_response
+            
             # Save to file if requested
-            if file_path and response.ok:
+            if file_path and 200 <= status_code < 300:
                 with open(file_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
@@ -229,25 +238,26 @@ class HTTPClient:
                 self._log_ssl_info(response)
             
             # Handle authentication
-            if response.status_code == 401:
+            if status_code == 401:
                 response = self._handle_authentication(request, response, url)
             
-            elif response.status_code == 407:
+            elif status_code == 407:
                 self.logger.error(
                     LOG_PREFIX + "proxy authentication required, wrong or no proxy credentials"
                 )
             
-            elif not response.ok and response.status_code not in skip_errors:
+            elif not (200 <= status_code < 300) and status_code not in skip_errors:
                 self._log_error(response, parsed_url)
             
             return response
             
         except requests.exceptions.RequestException as e:
             self.logger.error(LOG_PREFIX + f"communication error: {e}")
-            # Return error response
+            # Return error response with proper status code
             error_response = requests.Response()
             error_response.status_code = 500
             error_response._content = str(e).encode()
+            error_response.reason = str(e)
             return error_response
     
     def _add_oauth_token(self, request: requests.Request, url: str) -> None:
@@ -497,11 +507,17 @@ class HTTPClient:
         Returns:
             Compressed data
         """
+        self.logger.debug2(LOG_PREFIX + f"compress() using method: {self.compression}")
         if self.compression == 'zlib':
-            return zlib.compress(data)
+            compressed = zlib.compress(data)
+            self.logger.debug2(LOG_PREFIX + f"zlib compressed {len(data)} -> {len(compressed)}")
+            return compressed
         elif self.compression == 'gzip':
-            return gzip.compress(data)
+            compressed = gzip.compress(data)
+            self.logger.debug2(LOG_PREFIX + f"gzip compressed {len(data)} -> {len(compressed)}")
+            return compressed
         else:
+            self.logger.debug2(LOG_PREFIX + f"no compression, returning {len(data)} bytes as-is")
             return data
     
     def uncompress(self, data: bytes, content_type: Optional[str] = None) -> bytes:

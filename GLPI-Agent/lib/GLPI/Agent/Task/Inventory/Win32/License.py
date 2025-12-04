@@ -1,11 +1,11 @@
 # glpi_agent/task/inventory/win32/license.py
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import has_file
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import has_file
 from glpi_agent.tools.license import (
     decode_microsoft_key, get_adobe_licenses_without_sqlite
 )
-from glpi_agent.tools.win32 import (
+from GLPI.Agent.Tools.Win32 import (
     get_wmi_objects, get_registry_key, get_registry_key_value, is64bit
 )
 

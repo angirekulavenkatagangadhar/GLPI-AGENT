@@ -2,8 +2,8 @@
 
 import struct
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools.win32 import get_wmi_objects
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.Win32 import get_wmi_objects
 
 
 class Drives(InventoryModule):

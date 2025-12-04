@@ -302,7 +302,7 @@ Execution mode options:
         
         # Handle help
         if args.help:
-            self.print_help()
+            self.print_help()  
             return False
         
         # Configuration file validation - exact Perl logic
@@ -597,3 +597,481 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+
+# """
+# glpi-agent.py
+
+# This is a line-by-line functional conversion of the provided Perl "glpi-agent" single-file
+# into Python. It tries to preserve the control flow and CLI behaviour exactly while
+# delegating actual GLPI specifics to existing Python modules (which you said you
+# already have).
+
+# Notes:
+# - This script expects a Python-side "setup" module that provides a `setup` dict-like
+#   object (mirrors the Perl `setup`). If your setup module name / variable differ,
+#   adapt the import at the top.
+# - It expects Python equivalents for GLPI agent classes. The script imports them
+#   with forgiving error messages similar to the original Perl script.
+# - Behaviour, exit codes and option names try to match the Perl original verbatim.
+
+# No functional behaviour was intentionally changed; operations that require your
+# existing GLPI infrastructure are delegated to the classes you already maintain.
+
+# """
+
+# from __future__ import annotations
+# import sys
+# import os
+# import time
+# import random
+# import argparse
+# import importlib
+# import traceback
+# from typing import Any, Dict, List, Optional
+
+# # Try to import `setup` module. In the original Perl, `use setup; use lib $setup{libdir};`
+# # We assume a Python module named 'setup' exists and exposes a dict-like `setup`.
+# try:
+#     import setup as setup_mod
+# except Exception:
+#     setup_mod = None
+
+# # Build a setup dict like the Perl script expects.
+# setup: Dict[str, Any] = {}
+# if setup_mod is not None:
+#     # try few variants: `setup` variable, or attributes in module
+#     if hasattr(setup_mod, 'setup'):
+#         try:
+#             setup = dict(getattr(setup_mod, 'setup') or {})
+#         except Exception:
+#             setup = {}
+#     else:
+#         # collect module-level variables to a dict as fallback
+#         for name in dir(setup_mod):
+#             if not name.startswith('_'):
+#                 setup[name] = getattr(setup_mod, name)
+
+# # allow adding setup['libdir'] to sys.path (mimic Perl's use lib $setup{libdir})
+# libdir = setup.get('libdir')
+# if libdir:
+#     if os.path.isdir(libdir):
+#         if libdir not in sys.path:
+#             sys.path.insert(0, libdir)
+
+# # Helper: dynamic import with error handling similar to Perl::require usage
+# def require(module_name: str):
+#     try:
+#         return importlib.import_module(module_name)
+#     except Exception as e:
+#         raise ImportError(f"Can't load {module_name} library:\n{e}")
+
+# # Map the long list of options from Perl to argparse
+# parser = argparse.ArgumentParser(add_help=False)
+# # We'll manually add a --help later so that behaviour is close to pod2usage
+
+# # Add options. Types: i->int, s->string, s@ -> append, + -> count
+# parser.add_argument('--assetname-support', type=int)
+# parser.add_argument('--additional-content')
+# parser.add_argument('--backend-collect-timeout')
+# parser.add_argument('--ca-cert-dir')
+# parser.add_argument('--ca-cert-file')
+# parser.add_argument('--conf-file')
+# parser.add_argument('--conf-reload-interval', type=int)
+# parser.add_argument('--config')
+# parser.add_argument('--color', action='store_true')
+# parser.add_argument('--credentials', action='append')
+# parser.add_argument('--daemon', '-d', dest='daemon', action='store_true')
+# parser.add_argument('--no-fork', action='store_true')
+# parser.add_argument('--debug', action='count', default=0)
+# parser.add_argument('--delaytime')
+# parser.add_argument('--esx-itemtype')
+# parser.add_argument('--force', '-f', dest='force', action='store_true')
+# parser.add_argument('--full', action='store_true')
+# parser.add_argument('--full-inventory-postpone', type=int)
+# parser.add_argument('--glpi-version')
+# parser.add_argument('--help', '-h', action='store_true')
+# parser.add_argument('--html', action='store_true')
+# parser.add_argument('--itemtype')
+# parser.add_argument('--json', action='store_true')
+# parser.add_argument('--lazy', action='store_true')
+# parser.add_argument('--list-tasks', action='store_true')
+# parser.add_argument('--setup', dest='setup_opt', action='store_true')
+# parser.add_argument('--local', '-l')
+# parser.add_argument('--logger')
+# parser.add_argument('--logfacility')
+# parser.add_argument('--logfile')
+# parser.add_argument('--logfile-maxsize', type=int)
+# parser.add_argument('--no-category')
+# parser.add_argument('--no-httpd', action='store_true')
+# parser.add_argument('--no-ssl-check', action='store_true')
+# parser.add_argument('--no-compression', '-C', dest='no_compression', action='store_true')
+# parser.add_argument('--no-task')
+# parser.add_argument('--no-p2p', action='store_true')
+# parser.add_argument('--oauth-client-id')
+# parser.add_argument('--oauth-client-secret')
+# parser.add_argument('--partial')
+# parser.add_argument('--password', '-p')
+# parser.add_argument('--pidfile', nargs='?', const=True)
+# parser.add_argument('--proxy', '-P')
+# parser.add_argument('--httpd-ip')
+# parser.add_argument('--httpd-port')
+# parser.add_argument('--httpd-trust')
+# parser.add_argument('--list-categories', dest='list_categories', action='store_true')
+# parser.add_argument('--listen', action='store_true')
+# parser.add_argument('--remote')
+# parser.add_argument('--remote-workers', type=int)
+# parser.add_argument('--required-category')
+# parser.add_argument('--set-forcerun', dest='set_forcerun', action='store_true')
+# parser.add_argument('--scan-homedirs', action='store_true')
+# parser.add_argument('--scan-profiles', action='store_true')
+# parser.add_argument('--server', '-s')
+# parser.add_argument('--ssl-fingerprint')
+# parser.add_argument('--ssl-keystore')
+# parser.add_argument('--tag', '-t')
+# parser.add_argument('--tasks')
+# parser.add_argument('--timeout', type=int)
+# parser.add_argument('--user', '-u')
+# parser.add_argument('--vardir')
+# parser.add_argument('--version', action='store_true')
+# parser.add_argument('--wait', '-w')
+# parser.add_argument('--no-win32-ole-workaround', action='store_true')
+
+# # Platform specific option was present in Perl as last item
+
+# # Parse known args (ignore unknown for compatibility)
+# args, unknown = parser.parse_known_args()
+# options = vars(args)
+
+# # Implement help behaving like pod2usage(-verbose => 0)
+# if options.get('help'):
+#     parser.print_help()
+#     sys.exit(0)
+
+# # Version behavior
+# if options.get('version'):
+#     # Try to print version from GLPI.Agent
+#     try:
+#         GLPI_Agent = require('GLPI.Agent')
+#         ver = getattr(GLPI_Agent, 'VERSION_STRING', None)
+#         comments = getattr(GLPI_Agent, 'COMMENTS', None)
+#         if ver:
+#             print(ver)
+#         if comments:
+#             if isinstance(comments, (list, tuple)):
+#                 for c in comments:
+#                     print(c)
+#             else:
+#                 print(comments)
+#     except Exception:
+#         # Fallback: no GLPI Agent module available
+#         print('GLPI Agent module not available to print version')
+#     sys.exit(0)
+
+# # Setup option behaviour
+# if options.get('setup_opt'):
+#     try:
+#         GLPI_Agent = require('GLPI.Agent')
+#     except Exception as e:
+#         print(str(e), file=sys.stderr)
+#         sys.exit(1)
+#     # create an agent instance to get vardir
+#     try:
+#         agent = GLPI_Agent.GLPI_Agent(**setup) if hasattr(GLPI_Agent, 'GLPI_Agent') else GLPI_Agent.Agent(**setup)
+#     except Exception:
+#         # fallback: try GLPI_Agent.new like behaviour
+#         try:
+#             agent = GLPI_Agent(x=setup)  # best-effort; you probably have your own constructor
+#         except Exception:
+#             agent = None
+#     options['debug'] = 0
+#     if agent is not None and hasattr(agent, 'init'):
+#         try:
+#             agent.init(options=options)
+#             setup['vardir'] = getattr(agent, 'vardir', setup.get('vardir'))
+#         except Exception:
+#             pass
+#     # Print setup dict keys and values with aligned width
+#     longest = max((len(k) for k in setup.keys()), default=0)
+#     for key in sorted(setup.keys()):
+#         print(f"{key.ljust(longest)}: {setup[key]}")
+#     sys.exit(0)
+
+# # handle conf-file logic
+# if options.get('conf_file'):
+#     conf_file = options.get('conf_file')
+#     if options.get('config'):
+#         if options.get('config') != 'file':
+#             print(f"don't use --conf-file with {options.get('config')} backend", file=sys.stderr)
+#             sys.exit(1)
+#     else:
+#         options['config'] = 'file'
+
+# # Daemon: require GLPI::Agent::Daemon (in Python, GLPI.Agent.Daemon)
+# if options.get('daemon'):
+#     try:
+#         require('GLPI.Agent.Daemon')
+#     except Exception as e:
+#         print("Can't load GLPI::Agent::Daemon library:")
+#         print(str(e), file=sys.stderr)
+#         sys.exit(1)
+
+# # If full requested, set full-inventory-postpone to 0
+# if options.get('full'):
+#     options['full-inventory-postpone'] = 0
+
+# # Validate vardir existence
+# if options.get('vardir') and not os.path.isdir(options.get('vardir')):
+#     sys.exit(f"given '{options.get('vardir')}' vardir folder doesn't exist\n")
+
+# # create agent
+# agent = None
+# try:
+#     if options.get('daemon'):
+#         DaemonModule = importlib.import_module('GLPI.Agent.Daemon')
+#         # Try to fetch class
+#         AgentClass = getattr(DaemonModule, 'Daemon', None) or getattr(DaemonModule, 'GLPI_Agent_Daemon', None) or getattr(DaemonModule, 'GLPIAgentDaemon', None)
+#         if AgentClass:
+#             agent = AgentClass(**setup)
+#         else:
+#             agent = None
+#     else:
+#         AG = require('GLPI.Agent')
+#         AgentClass = getattr(AG, 'GLPI_Agent', None) or getattr(AG, 'Agent', None)
+#         if AgentClass:
+#             agent = AgentClass(**setup)
+
+# except Exception:
+#     # best-effort fallback: try to import GLPI.Agent as module object
+#     try:
+#         AG = importlib.import_module('GLPI.Agent')
+#         agent = getattr(AG, 'GLPI_Agent', None) or getattr(AG, 'Agent', None)
+#     except Exception:
+#         pass
+
+# # If --list-tasks given, init and list available tasks
+# if options.get('list_tasks'):
+#     # override logger to Stderr like Perl
+#     options['logger'] = 'Stderr'
+#     if agent is None:
+#         try:
+#             AG = require('GLPI.Agent')
+#             AgentClass = getattr(AG, 'GLPI_Agent', None) or getattr(AG, 'Agent', None)
+#             if AgentClass:
+#                 agent = AgentClass(**setup)
+#         except Exception:
+#             pass
+#     if agent is None:
+#         print('Cannot instantiate GLPI agent to list tasks', file=sys.stderr)
+#         sys.exit(1)
+#     try:
+#         agent.init(options=options)
+#     except Exception as e:
+#         print(f"Agent init failed: {e}", file=sys.stderr)
+#         traceback.print_exc()
+#         sys.exit(1)
+
+#     try:
+#         tasks = agent.getAvailableTasks()
+#     except Exception:
+#         tasks = {}
+#     print('\nAvailable tasks : \n')
+#     for task in tasks.keys():
+#         print(f"- {task} (v{tasks[task]})")
+
+#     # print targets
+#     try:
+#         targets = agent.getTargets()
+#     except Exception:
+#         targets = []
+#     for target in targets:
+#         try:
+#             t_id = getattr(target, 'id', None) or getattr(target, 'getId', lambda: '?')()
+#             t_type = target.getType() if hasattr(target, 'getType') else getattr(target, 'type', '?')
+#             sys.stdout.write(f"\ntarget {t_id}: {t_type}")
+#             if getattr(target, 'isType', lambda t: False)('local') or getattr(target, 'isType', lambda t: False)('server'):
+#                 name = getattr(target, 'getName', lambda: '')()
+#                 if name:
+#                     sys.stdout.write(' ' + name)
+#             sys.stdout.write('\n')
+#             planned = target.plannedTasks() if hasattr(target, 'plannedTasks') else []
+#             if planned:
+#                 print('Planned tasks: ' + ','.join(planned))
+#             else:
+#                 print(f"No planned task for {t_id}")
+#         except Exception:
+#             traceback.print_exc()
+#     print('\n')
+#     sys.exit(0)
+
+# # list-categories behaviour
+# if options.get('list_categories'):
+#     try:
+#         # dynamic import of GLPI.Agent.Task.Inventory
+#         inv_mod = require('GLPI.Agent.Task.Inventory')
+#     except Exception as e:
+#         print(str(e), file=sys.stderr)
+#         sys.exit(1)
+#     # instantiate inventory task
+#     try:
+#         InventoryClass = getattr(inv_mod, 'Inventory', None) or getattr(inv_mod, 'GLPI_Agent_Task_Inventory', None)
+#         inventory = None
+#         if InventoryClass:
+#             inventory = InventoryClass(
+#                 config=(agent.config if agent and hasattr(agent, 'config') else None),
+#                 datadir=(agent.datadir if agent and hasattr(agent, 'datadir') else None),
+#                 logger=(agent.logger if agent and hasattr(agent, 'logger') else None),
+#                 target='none',
+#                 deviceid=(agent.deviceid if agent and hasattr(agent, 'deviceid') else None),
+#             )
+#         else:
+#             # fallback: try to call inv_mod.new(...)
+#             inventory = inv_mod.new(
+#                 config=(agent.config if agent and hasattr(agent, 'config') else None),
+#             )
+#     except Exception as e:
+#         print(f"Failed to instantiate inventory module: {e}", file=sys.stderr)
+#         traceback.print_exc()
+#         sys.exit(1)
+#     try:
+#         print('Supported categories:')
+#         cats = []
+#         if hasattr(inventory, 'getCategories'):
+#             cats = inventory.getCategories()
+#         elif hasattr(inventory, 'categories'):
+#             cats = inventory.categories
+#         for cat in sorted(cats):
+#             print(' - ' + cat)
+#         sys.exit(0)
+#     except Exception as e:
+#         print(f"Failed to list categories: {e}", file=sys.stderr)
+#         traceback.print_exc()
+#         sys.exit(1)
+
+# # wait behaviour
+# if options.get('wait'):
+#     try:
+#         w = int(options.get('wait'))
+#         time_to_sleep = random.randint(0, w - 1) if w > 0 else 0
+#     except Exception:
+#         time_to_sleep = 0
+#     time.sleep(time_to_sleep)
+
+# # set-forcerun behaviour
+# if options.get('set_forcerun'):
+#     if agent is None:
+#         try:
+#             AG = require('GLPI.Agent')
+#             AgentClass = getattr(AG, 'GLPI_Agent', None) or getattr(AG, 'Agent', None)
+#             if AgentClass:
+#                 agent = AgentClass(**setup)
+#         except Exception:
+#             pass
+#     if agent is None:
+#         print('Cannot instantiate agent to set forcerun', file=sys.stderr)
+#         sys.exit(1)
+#     try:
+#         agent.setForceRun()
+#         sys.exit(0)
+#     except Exception as e:
+#         print(f"Failed to set forcerun: {e}", file=sys.stderr)
+#         sys.exit(1)
+
+# # partial option implies json
+# if options.get('partial'):
+#     if options.get('daemon'):
+#         sys.exit("--partial option not compatible with --daemon")
+#     # create event object
+#     try:
+#         EventMod = require('GLPI.Agent.Event')
+#         EventClass = getattr(EventMod, 'Event', None) or getattr(EventMod, 'GLPI_Agent_Event', None)
+#         if EventClass:
+#             agent.event = EventClass(
+#                 name='partial inventory',
+#                 task='inventory',
+#                 partial=1,
+#                 category=options.get('partial'),
+#             )
+#         else:
+#             # fallback: try to call EventMod.new(...)
+#             if hasattr(EventMod, 'new'):
+#                 agent.event = EventMod.new(
+#                     name='partial inventory',
+#                     task='inventory',
+#                     partial=1,
+#                     category=options.get('partial'),
+#                 )
+#     except Exception:
+#         print('Failed to create partial event; ensure GLPI.Agent.Event is available', file=sys.stderr)
+
+# # credentials option
+# if options.get('credentials'):
+#     if options.get('daemon'):
+#         sys.exit("--credentials option not compatible with --daemon")
+#     if agent is None:
+#         try:
+#             AG = require('GLPI.Agent')
+#             AgentClass = getattr(AG, 'GLPI_Agent', None) or getattr(AG, 'Agent', None)
+#             if AgentClass:
+#                 agent = AgentClass(**setup)
+#         except Exception:
+#             pass
+#     if agent is not None:
+#         agent.credentials = options.get('credentials')
+
+# # Main run block: wrapped in try/except like Perl eval
+# try:
+#     if agent is None:
+#         # attempt to instantiate agent if still None
+#         try:
+#             AG = require('GLPI.Agent')
+#             AgentClass = getattr(AG, 'GLPI_Agent', None) or getattr(AG, 'Agent', None)
+#             if AgentClass:
+#                 agent = AgentClass(**setup)
+#         except Exception:
+#             pass
+
+#     if agent is None:
+#         raise RuntimeError('Could not instantiate GLPI agent; required GLPI.Agent module not found or wrong constructor')
+
+#     # init agent with given options
+#     if hasattr(agent, 'init'):
+#         agent.init(options=options)
+
+#     # Windows-specific OLE workaround
+#     if os.name == 'nt' and not options.get('no_win32_ole_workaround'):
+#         try:
+#             win_tools = require('GLPI.Agent.Tools.Win32')
+#             if hasattr(win_tools, 'start_Win32_OLE_Worker'):
+#                 win_tools.start_Win32_OLE_Worker()
+#             if hasattr(win_tools, 'setupWorkerLogger'):
+#                 win_tools.setupWorkerLogger(config=getattr(agent, 'config', None))
+#         except Exception:
+#             # keep going even if workaround not available
+#             pass
+
+#     # finally run
+#     if hasattr(agent, 'run'):
+#         agent.run()
+#     else:
+#         # if agent is just a module with run function
+#         if hasattr(agent, 'main'):
+#             agent.main()
+
+# except Exception as e:
+#     print('Execution failure:.', file=sys.stderr)
+#     traceback.print_exc()
+#     print(str(e), file=sys.stderr)
+#     sys.exit(1)
+
+# sys.exit(0)

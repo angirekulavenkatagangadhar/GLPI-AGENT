@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from .base_target import Target
+from ..Target import Target
 
 # Module-level counter for unique IDs
 _count = 0

@@ -2,9 +2,9 @@
 
 from copy import deepcopy
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import hex2dec
-from glpi_agent.tools.win32 import get_registry_value, get_registry_key
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import hex2dec
+from GLPI.Agent.Tools.Win32 import get_registry_value, get_registry_key
 from glpi_agent.tools.network import get_interfaces
 from glpi_agent.tools.constants import STATUS_ON, STATUS_OFF
 

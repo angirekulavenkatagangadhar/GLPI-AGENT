@@ -335,6 +335,60 @@ def get_hdparm_info(**params) -> Optional[Dict]:
     return info
 
 
+def get_cpus_from_dmidecode(**params) -> List[Dict]:
+    """
+    Get CPU information from dmidecode.
+    Wrapper around get_dmidecode_infos that extracts CPU data.
+    
+    Returns:
+        List of CPU dictionaries
+    """
+    infos = get_dmidecode_infos(**params)
+    cpus = []
+    
+    if 'Processor Information' in infos:
+        for proc in infos['Processor Information']:
+            cpu = {}
+            if proc.get('Manufacturer'):
+                cpu['MANUFACTURER'] = proc['Manufacturer']
+            if proc.get('Version'):
+                cpu['NAME'] = proc['Version']
+            if proc.get('Max Speed'):
+                cpu['SPEED'] = proc['Max Speed']
+            if proc.get('Core Count'):
+                cpu['CORE'] = proc['Core Count']
+            if proc.get('Thread Count'):
+                cpu['THREAD'] = proc['Thread Count']
+            cpus.append(cpu)
+    
+    return cpus
+
+
+def get_canonical_manufacturer(manufacturer: str) -> str:
+    """
+    Get canonical manufacturer name.
+    
+    Args:
+        manufacturer: Raw manufacturer string
+        
+    Returns:
+        Canonical manufacturer name
+    """
+    if not manufacturer:
+        return ''
+    
+    # Simple canonicalization - can be expanded
+    m = manufacturer.upper().strip()
+    if 'INTEL' in m:
+        return 'Intel'
+    elif 'AMD' in m:
+        return 'AMD'
+    elif 'QUALCOMM' in m or 'SNAPDRAGON' in m:
+        return 'Qualcomm'
+    else:
+        return manufacturer.strip()
+
+
 if __name__ == '__main__':
     print("GLPI Agent Tools Generic Module")
     print("Generic OS-independent utility functions")

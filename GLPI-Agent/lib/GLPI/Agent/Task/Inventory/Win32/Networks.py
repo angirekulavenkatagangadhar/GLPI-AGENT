@@ -1,8 +1,8 @@
 # glpi_agent/task/inventory/win32/networks.py
 
-from glpi_agent.task.inventory.module import InventoryModule
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
 from glpi_agent.tools.network import get_interfaces
-from glpi_agent.tools.win32 import get_registry_key
+from GLPI.Agent.Tools.Win32 import get_registry_key
 
 
 class Networks(InventoryModule):

@@ -1,8 +1,8 @@
 # glpi_agent/task/inventory/win32/controllers.py
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools.generic import get_pci_device_vendor
-from glpi_agent.tools.win32 import get_wmi_objects
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.Generic import get_pci_device_vendor
+from GLPI.Agent.Tools.Win32 import get_wmi_objects
 
 
 class Controllers(InventoryModule):

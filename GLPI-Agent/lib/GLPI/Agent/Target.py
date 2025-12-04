@@ -2,9 +2,9 @@ import time
 import random
 from typing import List, Dict, Optional, Any
 
-from .logger import Logger
-from .storage import Storage
-from .event import Event
+from .Logger import Logger
+from .Storage import Storage
+from .Event import Event
 
 # Module-level variable for error max delay
 _err_max_delay = 0
@@ -137,6 +137,10 @@ class Target:
         self.nextRunDate = self.computeNextRunDate(timeref)
         self.baseRunDate = timeref + max_delay
         self._saveState()
+    
+    def reset_next_run_date(self):
+        """Alias for resetNextRunDate (snake_case version)"""
+        return self.resetNextRunDate()
     
     def getNextRunDate(self) -> Optional[float]:
         """Get next run date, reloading state if needed"""
@@ -303,8 +307,8 @@ class Target:
         """Pause target"""
         self._paused = True
     
-    def continue(self):
-        """Resume target"""
+    def resume(self):
+        """Resume target (renamed from 'continue' which is Python keyword)"""
         self._paused = False
     
     def getFormatedNextRunDate(self) -> str:
@@ -328,6 +332,14 @@ class Target:
             return False
         target_type = self.getType()
         return target_type == testtype if target_type else False
+    
+    def is_type(self, testtype: str) -> bool:
+        """Alias for isType (snake_case version)"""
+        return self.isType(testtype)
+    
+    def get_type(self) -> Optional[str]:
+        """Alias for getType (snake_case version)"""
+        return self.getType()
     
     def isGlpiServer(self) -> bool:
         """Check if target is GLPI server (override in subclasses)"""

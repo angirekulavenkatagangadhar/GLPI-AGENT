@@ -11,9 +11,9 @@ import re
 from urllib.parse import urlparse, urlunparse, parse_qs
 from typing import Dict, List, Optional, Any
 
-from .base_target import Target
-from ..logger import Logger
-from ..config import Config
+from ..Target import Target
+from ..Logger import Logger
+from ..Config import Config
 
 # Module-level counter for unique IDs
 _count = 0
@@ -79,6 +79,15 @@ class ServerTarget(Target):
         if subdir == oldvardir:
             oldvardir = ""
         
+        # Initialize server-specific attributes BEFORE _init() which calls getMaxDelay()
+        self._server_task_support: Dict[str, Dict[str, Any]] = {}
+        self._is_glpi_server: bool = False
+        self._glpi_server = ""  # Alias for compatibility
+        self._max_delay: Optional[int] = None
+        self._next_run_date: Optional[int] = None
+        self._deviceid: Optional[str] = None
+        self._glpi: str = ""  # Default GLPI version
+        
         self._init(
             id=f'server{_count}',
             vardir=f"{params['basevardir']}/{subdir}",
@@ -86,14 +95,6 @@ class ServerTarget(Target):
         )
         
         _count += 1
-        
-        # Initialize server-specific attributes
-        self._server_task_support: Dict[str, Dict[str, Any]] = {}
-        self._is_glpi_server: bool = False
-        self._max_delay: Optional[int] = None
-        self._next_run_date: Optional[int] = None
-        self._deviceid: Optional[str] = None
-        self._glpi: str = ""  # Default GLPI version
     
     @classmethod
     def reset(cls):
@@ -181,6 +182,10 @@ class ServerTarget(Target):
         clean_parsed = parsed._replace(netloc=netloc)
         return urlunparse(clean_parsed)
     
+    def get_name(self):
+        """Alias for getName (snake_case version)"""
+        return self.getName()
+    
     def getType(self) -> str:
         """Return the target type."""
         return 'server'
@@ -203,6 +208,10 @@ class ServerTarget(Target):
         
         return self._is_glpi_server
     
+    def is_glpi_server(self, value: Optional[bool] = None) -> bool:
+        """Alias for isGlpiServer (snake_case version)"""
+        return self.isGlpiServer(value)
+    
     def plannedTasks(self, tasks: Optional[List[str]] = None) -> List[str]:
         """
         Set or get planned tasks for this target.
@@ -217,6 +226,10 @@ class ServerTarget(Target):
             self.tasks = list(tasks)
         
         return getattr(self, 'tasks', [])
+    
+    def planned_tasks(self, tasks: Optional[List[str]] = None) -> List[str]:
+        """Alias for plannedTasks (snake_case version)"""
+        return self.plannedTasks(tasks)
     
     def setServerTaskSupport(self, task: str, support: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -323,7 +336,8 @@ class ServerTarget(Target):
         Returns:
             Delay in seconds or None
         """
-        return self._max_delay
+        # Use _max_delay if set, otherwise fall back to parent's maxDelay
+        return self._max_delay if self._max_delay is not None else self.maxDelay
     
     def setNextRunDate(self, timestamp: int):
         """

@@ -158,23 +158,51 @@ class GLPITask(ABC):
         
         try:
             # Import the package
+            self.logger.debug2(f"Trying to import package: {package_name}")
             package = importlib.import_module(package_name)
             package_path = getattr(package, '__path__', None)
             
             if package_path:
-                # Discover all modules in the package
+                self.logger.debug2(f"Package path: {package_path}")
+                # Discover all modules in the package (including subdirectories)
                 for importer, modname, ispkg in pkgutil.walk_packages(
                     path=package_path,
-                    prefix=f"{package_name}."
+                    prefix=f"{package_name}.",
+                    onerror=lambda x: None  # Ignore errors on individual modules
                 ):
-                    modules.append(modname)
-                    self.logger.debug2(f"Found module: {modname}")
+                    # Only include actual module files, not __init__ or directories
+                    if not modname.endswith('.__init__') and not ispkg:
+                        # Keep full module path for import
+                        modules.append(modname)
+                        self.logger.debug2(f"Found module: {modname}")
+            else:
+                self.logger.debug(f"Package {package_name} has no __path__ attribute")
             
         except ImportError as e:
             self.logger.debug(f"Could not import package {package_name}: {e}")
+            # Try alternative: GLPI.Agent.Task.Inventory directly
+            if task and task.lower() == 'inventory':
+                alt_package = "GLPI.Agent.Task.Inventory"
+                try:
+                    self.logger.debug2(f"Trying alternative package: {alt_package}")
+                    package = importlib.import_module(alt_package)
+                    package_path = getattr(package, '__path__', None)
+                    if package_path:
+                        for importer, modname, ispkg in pkgutil.walk_packages(
+                            path=package_path,
+                            prefix=f"{alt_package}.",
+                            onerror=lambda x: None
+                        ):
+                            if not modname.endswith('.__init__') and not ispkg:
+                                # Keep full module path for import
+                                modules.append(modname)
+                                self.logger.debug2(f"Found module (alt): {modname}")
+                except Exception as e2:
+                    self.logger.debug(f"Alternative package also failed: {e2}")
         except Exception as e:
             self.logger.debug(f"Error discovering modules: {e}")
         
+        self.logger.debug(f"Discovered {len(modules)} modules for task {task}")
         return sorted(modules)
 
     def getRemote(self) -> str:

@@ -806,7 +806,7 @@ class Inventory:
             
             while remaining:
                 # Extract key
-                match = re.match(r'^(\w+):(.*), remaining)
+                match = re.match(r'^(\w+):(.*)', remaining)
                 if not match:
                     break
                 
@@ -823,14 +823,14 @@ class Inventory:
                     temp_marker = ',' * ord(quote)
                     remaining = remaining.replace(f'\\{quote}', f'\\{temp_marker}')
                     
-                    match = re.match(rf'^[{quote}]([^{quote}]+)[{quote}](.*), remaining)
+                    match = re.match(rf'^[{quote}]([^{quote}]+)[{quote}](.*)', remaining)
                     if match:
                         value = match.group(1).replace(f'\\{temp_marker}', quote)
                         remaining = match.group(2).replace(f'\\{temp_marker}', f'\\{quote}')
                     else:
                         break
                 else:
-                    match = re.match(r'^([^,]+)(.*), remaining)
+                    match = re.match(r'^([^,]+)(.*)', remaining)
                     if match:
                         value = match.group(1)
                         remaining = match.group(2)

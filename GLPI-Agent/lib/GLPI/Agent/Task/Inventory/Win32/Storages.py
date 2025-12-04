@@ -1,9 +1,9 @@
 # glpi_agent/task/inventory/win32/storages.py
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import can_run, trim_whitespace, empty
-from glpi_agent.tools.generic import get_hdparm_info
-from glpi_agent.tools.win32 import get_wmi_objects
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, trim_whitespace, empty
+from GLPI.Agent.Tools.Generic import get_hdparm_info
+from GLPI.Agent.Tools.Win32 import get_wmi_objects
 
 
 class Storages(InventoryModule):

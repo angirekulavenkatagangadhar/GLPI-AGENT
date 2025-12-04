@@ -1,8 +1,8 @@
 # glpi_agent/task/inventory/win32/memory.py
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import get_canonical_speed
-from glpi_agent.tools.win32 import get_wmi_objects
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import get_canonical_speed
+from GLPI.Agent.Tools.Win32 import get_wmi_objects
 
 
 class Memory(InventoryModule):

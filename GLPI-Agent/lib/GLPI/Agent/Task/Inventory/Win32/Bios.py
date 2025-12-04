@@ -1,9 +1,9 @@
 # glpi_agent/task/inventory/win32/bios.py
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import empty
-from glpi_agent.tools.win32 import get_wmi_objects, get_registry_value
-from glpi_agent.tools.generic import is_invalid_bios_value
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import empty
+from GLPI.Agent.Tools.Win32 import get_wmi_objects, get_registry_value
+from GLPI.Agent.Tools.Generic import is_invalid_bios_value
 
 
 class Bios(InventoryModule):

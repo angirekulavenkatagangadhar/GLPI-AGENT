@@ -30,3 +30,53 @@ release-description.md
 .pc
 build/
 appimage-builder-cache/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+dist/
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+*.xml
+battery-report.*
+battery-test.*
+
+# GLPI Agent runtime storage directories (server-specific)
+# These are created from server URLs (e.g., http://test.com -> http..__test.com on Windows)
+http..__*/
+http:__*/
+https..__*/
+https:__*/
+# Pattern for any URL-based storage directory (contains double underscore)
+*__*/
+
+# Reference/development folders
+perl-reference/

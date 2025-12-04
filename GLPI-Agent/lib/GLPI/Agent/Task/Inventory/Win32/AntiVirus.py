@@ -6,13 +6,13 @@ import time
 import json
 from pathlib import Path
 
-from glpi_agent.task.inventory.module import InventoryModule
-from glpi_agent.tools import (
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import (
     can_run, has_file, has_folder, get_all_lines, get_first_line,
     get_first_match, get_directory_handle, get_sanitized_string, 
     dec2hex, hex2dec, first
 )
-from glpi_agent.tools.win32 import (
+from GLPI.Agent.Tools.Win32 import (
     get_wmi_objects, get_registry_key, get_registry_key_value, 
     is64bit, get_services
 )
