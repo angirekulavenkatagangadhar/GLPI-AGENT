@@ -70,9 +70,25 @@ class LocalTarget(Target):
         """Return the target name"""
         return self.path
     
+    def get_name(self):
+        """Alias for getName (snake_case version)"""
+        return self.getName()
+    
     def getType(self) -> str:
         """Return the target type"""
         return 'local'
+    
+    def get_type(self):
+        """Alias for getType (snake_case version)"""
+        return self.getType()
+    
+    def isGlpiServer(self) -> bool:
+        """Check if this is a GLPI server target"""
+        return False
+    
+    def is_glpi_server(self) -> bool:
+        """Alias for isGlpiServer (snake_case version)"""
+        return self.isGlpiServer()
     
     def plannedTasks(self, tasks: Optional[List[str]] = None) -> List[str]:
         """Set or get planned tasks - local only supports inventory tasks"""
@@ -82,3 +98,7 @@ class LocalTarget(Target):
                          if task.lower() in ('inventory', 'remoteinventory')]
         
         return getattr(self, 'tasks', [])
+    
+    def planned_tasks(self, tasks: Optional[List[str]] = None) -> List[str]:
+        """Alias for plannedTasks (snake_case version)"""
+        return self.plannedTasks(tasks)

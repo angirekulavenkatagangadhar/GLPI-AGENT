@@ -499,7 +499,21 @@ class InventoryTask(BaseTask):
                 inventory_data['windows'] = self._collect_windows_enriched()
         except Exception:
             pass
-       
+        
+        # macOS enriched sections (best-effort)
+        try:
+            if platform.system() == 'Darwin':
+                inventory_data['macos'] = self._collect_macos_enriched()
+        except Exception:
+            pass
+        
+        # Linux enriched sections (best-effort)
+        try:
+            if platform.system() == 'Linux':
+                inventory_data['linux'] = self._collect_linux_enriched()
+        except Exception:
+            pass
+        
         # Send to target
         if self.target.is_type('server'):
             self._send_to_server(inventory_data)
@@ -1140,6 +1154,1053 @@ class InventoryTask(BaseTask):
             self.logger.info(f"Collected {len(all_controllers)} controllers with PCI IDs (following Perl module approach)")
         
         return all_controllers if all_controllers else []
+
+    # ------------------- macOS Collection Methods -------------------
+    
+    def _macos_json(self, command: List[str]) -> Any:
+        """Run a macOS command and parse JSON output."""
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                return None
+            txt = result.stdout.strip()
+            return json.loads(txt) if txt else None
+        except Exception:
+            return None
+    
+    def _macos_plist(self, command: List[str]) -> Any:
+        """Run a macOS command and parse plist output."""
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                return None
+            txt = result.stdout.strip()
+            # Parse plist XML
+            import plistlib
+            return plistlib.loads(txt.encode()) if txt else None
+        except Exception:
+            return None
+    
+    def _macos_system_profiler(self, data_type: str) -> Dict[str, Any]:
+        """Get system_profiler data as structured dict."""
+        try:
+            result = subprocess.run(
+                ['/usr/sbin/system_profiler', data_type, '-xml'],
+                capture_output=True, text=True, timeout=60
+            )
+            if result.returncode != 0:
+                return {}
+            import plistlib
+            data = plistlib.loads(result.stdout.encode())
+            return data[0].get('_items', [{}])[0] if data and len(data) > 0 else {}
+        except Exception:
+            return {}
+    
+    def _macos_ioreg(self, entry: str = None, key: str = None) -> Any:
+        """Get IORegistry data using ioreg command."""
+        try:
+            cmd = ['ioreg', '-a', '-r', '-l']
+            if entry:
+                cmd.extend(['-c', entry])
+            if key:
+                cmd.extend(['-k', key])
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                return None
+            txt = result.stdout.strip()
+            return json.loads(txt) if txt else None
+        except Exception:
+            return None
+    
+    def collect_macos_os_info(self) -> Optional[Dict[str, Any]]:
+        """Collect macOS OS information."""
+        try:
+            # Get system version
+            result = subprocess.run(
+                ['sw_vers'],
+                capture_output=True, text=True, timeout=10
+            )
+            os_info = {}
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        key = key.strip().lower().replace(' ', '_')
+                        os_info[key] = value.strip()
+            
+            # Get kernel version
+            result = subprocess.run(
+                ['uname', '-r'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                os_info['kernel_version'] = result.stdout.strip()
+            
+            # Get boot time
+            result = subprocess.run(
+                ['sysctl', '-n', 'kern.boottime'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                import re
+                match = re.search(r'sec = (\d+)', result.stdout)
+                if match:
+                    os_info['boot_time'] = int(match.group(1))
+            
+            return os_info if os_info else None
+        except Exception:
+            return None
+    
+    def collect_macos_hardware_summary(self) -> Optional[Dict[str, Any]]:
+        """Collect macOS hardware summary."""
+        try:
+            hw = self._macos_system_profiler('SPHardwareDataType')
+            if not hw:
+                return None
+            
+            # Get manufacturer from system_profiler (should be Apple, but get it dynamically)
+            manufacturer = hw.get('Manufacturer') or hw.get('manufacturer')
+            if not manufacturer:
+                # Fallback: Check if it's an Apple device (all Macs are Apple)
+                # This is a reasonable assumption but we try to get it from system first
+                manufacturer = 'Apple'
+            
+            return {
+                'manufacturer': manufacturer,
+                'model': hw.get('Model Name') or hw.get('model_name'),
+                'model_identifier': hw.get('Model Identifier') or hw.get('model_identifier'),
+                'serial_number': hw.get('Serial Number') or hw.get('serial_number'),
+                'hardware_uuid': hw.get('Hardware UUID') or hw.get('hardware_uuid'),
+                'processor_name': hw.get('Processor Name') or hw.get('processor_name'),
+                'processor_speed': hw.get('Processor Speed') or hw.get('processor_speed'),
+                'number_of_processors': hw.get('Number of Processors') or hw.get('number_of_processors'),
+                'total_number_of_cores': hw.get('Total Number of Cores') or hw.get('total_number_of_cores'),
+                'memory': hw.get('Memory') or hw.get('memory'),
+            }
+        except Exception:
+            return None
+    
+    def collect_macos_cpu_info(self) -> Optional[Any]:
+        """Collect macOS CPU information."""
+        try:
+            hw = self._macos_system_profiler('SPHardwareDataType')
+            if not hw:
+                return None
+            
+            # Get additional CPU info from sysctl
+            result = subprocess.run(
+                ['sysctl', '-a', 'machdep.cpu'],
+                capture_output=True, text=True, timeout=10
+            )
+            sysctl_info = {}
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        sysctl_info[key.strip()] = value.strip()
+            
+            cpu_info = {
+                'name': hw.get('Processor Name') or sysctl_info.get('machdep.cpu.brand_string'),
+                'cores': hw.get('Total Number of Cores') or sysctl_info.get('machdep.cpu.core_count'),
+                'threads': sysctl_info.get('machdep.cpu.thread_count'),
+                'speed': hw.get('Processor Speed'),
+                'number_of_processors': hw.get('Number of Processors', 1),
+            }
+            
+            return cpu_info
+        except Exception:
+            return None
+    
+    def collect_macos_memory_info(self) -> Optional[Dict[str, Any]]:
+        """Collect macOS memory information."""
+        try:
+            hw = self._macos_system_profiler('SPHardwareDataType')
+            memory_str = hw.get('Memory') or hw.get('memory', '')
+            
+            # Parse memory string like "16 GB"
+            import re
+            match = re.match(r'(\d+)\s*(GB|MB)', memory_str, re.IGNORECASE)
+            total_bytes = None
+            if match:
+                value = int(match.group(1))
+                unit = match.group(2).upper()
+                if unit == 'GB':
+                    total_bytes = value * 1024 * 1024 * 1024
+                elif unit == 'MB':
+                    total_bytes = value * 1024 * 1024
+            
+            # Get memory modules from system_profiler
+            mem_modules = self._macos_system_profiler('SPMemoryDataType')
+            modules = []
+            if isinstance(mem_modules, dict):
+                # Extract memory slots
+                for key, value in mem_modules.items():
+                    if 'dimm' in key.lower() or 'slot' in key.lower():
+                        if isinstance(value, dict):
+                            modules.append(value)
+            
+            return {
+                'total_bytes': total_bytes,
+                'modules': modules if modules else None
+            }
+        except Exception:
+            return None
+    
+    def collect_macos_storage_info(self) -> Optional[Dict[str, Any]]:
+        """Collect macOS storage information."""
+        try:
+            # Get storage info from system_profiler
+            storage = self._macos_system_profiler('SPStorageDataType')
+            disks = []
+            
+            if isinstance(storage, dict):
+                # Extract disk information
+                for key, value in storage.items():
+                    if isinstance(value, dict) and ('size' in key.lower() or 'disk' in key.lower()):
+                        disks.append(value)
+            
+            # Also get from diskutil
+            result = subprocess.run(
+                ['diskutil', 'list', '-plist'],
+                capture_output=True, text=True, timeout=30
+            )
+            diskutil_data = None
+            if result.returncode == 0:
+                try:
+                    import plistlib
+                    diskutil_data = plistlib.loads(result.stdout.encode())
+                except Exception:
+                    pass
+            
+            return {
+                'physical_disks': disks if disks else None,
+                'diskutil': diskutil_data
+            }
+        except Exception:
+            return None
+    
+    def collect_macos_video_info(self) -> Dict[str, Any]:
+        """Collect macOS video/display information."""
+        try:
+            # Get graphics info from system_profiler
+            graphics = self._macos_system_profiler('SPDisplaysDataType')
+            gpus = []
+            
+            if isinstance(graphics, dict):
+                # Extract GPU information
+                for key, value in graphics.items():
+                    if isinstance(value, dict):
+                        gpus.append(value)
+            
+            return {
+                'gpus': gpus if gpus else None
+            }
+        except Exception:
+            return {}
+    
+    def collect_macos_monitors_info(self) -> Dict[str, Any]:
+        """Collect macOS monitor/display information."""
+        try:
+            # Get display info from system_profiler
+            displays = self._macos_system_profiler('SPDisplaysDataType')
+            monitor_list = []
+            
+            if isinstance(displays, dict):
+                # Extract monitor information
+                for key, value in displays.items():
+                    if isinstance(value, dict) and ('display' in key.lower() or 'resolution' in key.lower()):
+                        monitor_list.append(value)
+            
+            # Also get from IORegistry for EDID data
+            ioreg_displays = self._macos_ioreg(entry='IODisplayWrangler')
+            
+            return {
+                'displays': monitor_list if monitor_list else None,
+                'ioreg_displays': ioreg_displays
+            }
+        except Exception:
+            return {}
+    
+    def collect_macos_audio_info(self) -> Optional[Any]:
+        """Collect macOS audio/sound device information."""
+        try:
+            # Get audio info from system_profiler
+            audio = self._macos_system_profiler('SPAudioDataType')
+            if not audio:
+                return None
+            
+            devices = []
+            if isinstance(audio, dict):
+                for key, value in audio.items():
+                    if isinstance(value, dict):
+                        devices.append(value)
+            
+            return devices if devices else None
+        except Exception:
+            return None
+    
+    def collect_macos_network_info(self) -> Dict[str, Any]:
+        """Collect macOS network information."""
+        try:
+            # Get network info from system_profiler
+            network = self._macos_system_profiler('SPNetworkDataType')
+            adapters = []
+            
+            if isinstance(network, dict):
+                # Extract network interfaces
+                for key, value in network.items():
+                    if isinstance(value, dict):
+                        adapters.append(value)
+            
+            # Also get from ifconfig
+            result = subprocess.run(
+                ['ifconfig'],
+                capture_output=True, text=True, timeout=30
+            )
+            ifconfig_data = result.stdout if result.returncode == 0 else None
+            
+            return {
+                'adapters': adapters if adapters else None,
+                'ifconfig': ifconfig_data
+            }
+        except Exception:
+            return {}
+    
+    def collect_macos_printer_info(self) -> Optional[Any]:
+        """Collect macOS printer information."""
+        try:
+            result = subprocess.run(
+                ['lpstat', '-p', '-d'],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                return None
+            
+            printers = []
+            for line in result.stdout.splitlines():
+                if line.startswith('printer'):
+                    # Parse printer line
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        printers.append({
+                            'name': parts[1],
+                            'status': ' '.join(parts[2:]) if len(parts) > 2 else 'idle'
+                        })
+            
+            return printers if printers else None
+        except Exception:
+            return None
+    
+    def collect_macos_software_info(self) -> Optional[Any]:
+        """Collect macOS installed software information."""
+        try:
+            # Get applications from /Applications
+            apps = []
+            import os
+            app_dir = '/Applications'
+            if os.path.isdir(app_dir):
+                for item in os.listdir(app_dir):
+                    if item.endswith('.app'):
+                        app_path = os.path.join(app_dir, item)
+                        # Get app info from Info.plist
+                        plist_path = os.path.join(app_path, 'Contents', 'Info.plist')
+                        if os.path.exists(plist_path):
+                            try:
+                                import plistlib
+                                with open(plist_path, 'rb') as f:
+                                    plist = plistlib.load(f)
+                                    apps.append({
+                                        'name': plist.get('CFBundleName') or item.replace('.app', ''),
+                                        'version': plist.get('CFBundleShortVersionString'),
+                                        'bundle_id': plist.get('CFBundleIdentifier')
+                                    })
+                            except Exception:
+                                apps.append({'name': item.replace('.app', '')})
+            
+            return apps[:100] if apps else None  # Limit to 100
+        except Exception:
+            return None
+    
+    def collect_macos_power_info(self) -> Optional[Dict[str, Any]]:
+        """Collect macOS power/battery information."""
+        try:
+            # Get power info from system_profiler
+            power = self._macos_system_profiler('SPPowerDataType')
+            batteries = []
+            
+            if isinstance(power, dict):
+                battery_info = power.get('Battery Information') or power.get('battery_information', {})
+                if battery_info:
+                    batteries.append(battery_info)
+            
+            # Also get from ioreg for more details
+            ioreg_battery = self._macos_ioreg(entry='IOPMPowerSource')
+            
+            return {
+                'batteries': batteries if batteries else None,
+                'ioreg_battery': ioreg_battery
+            }
+        except Exception:
+            return None
+    
+    def collect_macos_controllers_info(self) -> Optional[Any]:
+        """Collect macOS controller information (PCI, USB, etc.)."""
+        try:
+            # Get PCI devices from system_profiler
+            pci = self._macos_system_profiler('SPPCIDataType')
+            controllers = []
+            
+            if isinstance(pci, dict):
+                # Extract PCI controller information
+                for key, value in pci.items():
+                    if isinstance(value, dict):
+                        controllers.append(value)
+            
+            # Also get USB controllers
+            usb = self._macos_system_profiler('SPUSBDataType')
+            if isinstance(usb, dict):
+                for key, value in usb.items():
+                    if isinstance(value, dict) and 'controller' in key.lower():
+                        controllers.append(value)
+            
+            return controllers if controllers else None
+        except Exception:
+            return None
+
+    def _collect_macos_enriched(self, categories: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Collect extended macOS inventory via system_profiler, ioreg, etc.
+        
+        Args:
+            categories: Optional list of specific categories to collect.
+                       If None, collects all categories.
+                       Valid categories: 'os', 'hardware', 'cpu', 'memory', 'storage',
+                       'video', 'audio', 'network', 'printers', 'software', 'power',
+                       'controllers', 'monitors'
+        
+        Returns:
+            Dictionary with collected inventory data
+        """
+        data: Dict[str, Any] = {}
+        collect_all = categories is None or len(categories) == 0
+        
+        # Map category names to methods
+        category_map = {
+            'os': ('operating_system', self.collect_macos_os_info),
+            'hardware': ('hardware_summary', self.collect_macos_hardware_summary),
+            'cpu': ('cpu', self.collect_macos_cpu_info),
+            'memory': ('memory', self.collect_macos_memory_info),
+            'storage': ('storage', self.collect_macos_storage_info),
+            'video': ('video', self.collect_macos_video_info),
+            'audio': ('audio', self.collect_macos_audio_info),
+            'network': ('network_detail', self.collect_macos_network_info),
+            'printers': ('printers', self.collect_macos_printer_info),
+            'software': ('software', self.collect_macos_software_info),
+            'power': ('power', self.collect_macos_power_info),
+            'controllers': ('controllers', self.collect_macos_controllers_info),
+            'monitors': ('monitors', self.collect_macos_monitors_info),
+        }
+        
+        # Collect requested categories
+        for cat_key, (output_key, method) in category_map.items():
+            if collect_all or cat_key in categories:
+                try:
+                    result = method()
+                    if result is not None:
+                        data[output_key] = result
+                except Exception:
+                    pass  # Skip failed categories
+        
+        return data
+
+    # ------------------- Linux Collection Methods -------------------
+    
+    def _linux_read_file(self, filepath: str) -> Optional[str]:
+        """Read a file and return its content."""
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read().strip()
+        except Exception:
+            return None
+    
+    def _linux_read_lines(self, filepath: str) -> List[str]:
+        """Read a file and return its lines."""
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                return [line.strip() for line in f.readlines()]
+        except Exception:
+            return []
+    
+    def _linux_run_command(self, command: List[str], timeout: int = 30) -> Optional[str]:
+        """Run a Linux command and return output."""
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
+    
+    def collect_linux_os_info(self) -> Optional[Dict[str, Any]]:
+        """Collect Linux OS information."""
+        try:
+            os_info = {}
+            
+            # Get OS release info
+            release_file = '/etc/os-release'
+            if os.path.exists(release_file):
+                lines = self._linux_read_lines(release_file)
+                for line in lines:
+                    if '=' in line and not line.startswith('#'):
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        os_info[key.lower()] = value
+            
+            # Get kernel version
+            kernel = self._linux_read_file('/proc/sys/kernel/osrelease')
+            if kernel:
+                os_info['kernel_version'] = kernel
+            
+            # Get hostname
+            hostname = self._linux_read_file('/proc/sys/kernel/hostname')
+            if hostname:
+                os_info['hostname'] = hostname
+            
+            # Get uptime
+            uptime_sec = self._linux_read_file('/proc/uptime')
+            if uptime_sec:
+                try:
+                    os_info['uptime_seconds'] = int(float(uptime_sec.split()[0]))
+                except (ValueError, IndexError):
+                    pass
+            
+            return os_info if os_info else None
+        except Exception:
+            return None
+    
+    def collect_linux_hardware_summary(self) -> Optional[Dict[str, Any]]:
+        """Collect Linux hardware summary using dmidecode."""
+        try:
+            # Try dmidecode first
+            result = self._linux_run_command(['dmidecode', '-s', 'system-manufacturer'])
+            manufacturer = result if result else None
+            
+            result = self._linux_run_command(['dmidecode', '-s', 'system-product-name'])
+            model = result if result else None
+            
+            result = self._linux_run_command(['dmidecode', '-s', 'system-serial-number'])
+            serial_number = result if result else None
+            
+            result = self._linux_run_command(['dmidecode', '-s', 'bios-vendor'])
+            bios_vendor = result if result else None
+            
+            result = self._linux_run_command(['dmidecode', '-s', 'bios-version'])
+            bios_version = result if result else None
+            
+            result = self._linux_run_command(['dmidecode', '-s', 'bios-release-date'])
+            bios_date = result if result else None
+            
+            # Get chassis type
+            result = self._linux_run_command(['dmidecode', '-s', 'chassis-type'])
+            chassis_type = result if result else None
+            
+            return {
+                'manufacturer': manufacturer,
+                'model': model,
+                'serial_number': serial_number,
+                'bios_vendor': bios_vendor,
+                'bios_version': bios_version,
+                'bios_date': bios_date,
+                'chassis_type': chassis_type,
+            }
+        except Exception:
+            return None
+    
+    def collect_linux_cpu_info(self) -> Optional[Any]:
+        """Collect Linux CPU information from /proc/cpuinfo."""
+        try:
+            cpuinfo = self._linux_read_file('/proc/cpuinfo')
+            if not cpuinfo:
+                return None
+            
+            cpus = []
+            current_cpu = {}
+            
+            for line in cpuinfo.splitlines():
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    
+                    if key == 'processor':
+                        if current_cpu:
+                            cpus.append(current_cpu)
+                        current_cpu = {}
+                    
+                    if key in ['model name', 'Processor', 'cpu']:
+                        current_cpu['name'] = value
+                    elif key == 'cpu MHz':
+                        try:
+                            current_cpu['speed'] = int(float(value))
+                        except ValueError:
+                            pass
+                    elif key == 'cpu cores':
+                        try:
+                            current_cpu['cores'] = int(value)
+                        except ValueError:
+                            pass
+                    elif key == 'siblings':
+                        try:
+                            current_cpu['threads'] = int(value)
+                        except ValueError:
+                            pass
+            
+            if current_cpu:
+                cpus.append(current_cpu)
+            
+            return cpus[0] if cpus else None
+        except Exception:
+            return None
+    
+    def collect_linux_memory_info(self) -> Optional[Dict[str, Any]]:
+        """Collect Linux memory information."""
+        try:
+            meminfo = self._linux_read_file('/proc/meminfo')
+            if not meminfo:
+                return None
+            
+            total_kb = None
+            for line in meminfo.splitlines():
+                if line.startswith('MemTotal:'):
+                    try:
+                        total_kb = int(line.split()[1])
+                    except (ValueError, IndexError):
+                        pass
+                    break
+            
+            total_bytes = total_kb * 1024 if total_kb else None
+            
+            # Try to get memory modules from dmidecode
+            modules = []
+            result = self._linux_run_command(['dmidecode', '-t', '17'])
+            if result:
+                # Parse dmidecode output for memory modules
+                current_module = {}
+                for line in result.splitlines():
+                    if 'Size:' in line and 'No Module Installed' not in line:
+                        try:
+                            size_str = line.split('Size:')[1].strip()
+                            if 'MB' in size_str:
+                                size_mb = int(size_str.replace('MB', '').strip())
+                                current_module['size_mb'] = size_mb
+                            elif 'GB' in size_str:
+                                size_gb = int(size_str.replace('GB', '').strip())
+                                current_module['size_mb'] = size_gb * 1024
+                        except (ValueError, IndexError):
+                            pass
+                    elif 'Speed:' in line:
+                        try:
+                            speed = line.split('Speed:')[1].strip().split()[0]
+                            current_module['speed'] = int(speed)
+                        except (ValueError, IndexError):
+                            pass
+                    elif 'Manufacturer:' in line:
+                        current_module['manufacturer'] = line.split('Manufacturer:')[1].strip()
+                    elif 'Serial Number:' in line:
+                        current_module['serial'] = line.split('Serial Number:')[1].strip()
+                    elif 'Part Number:' in line:
+                        current_module['part_number'] = line.split('Part Number:')[1].strip()
+                    elif line.strip() == '' and current_module:
+                        modules.append(current_module)
+                        current_module = {}
+                if current_module:
+                    modules.append(current_module)
+            
+            return {
+                'total_bytes': total_bytes,
+                'modules': modules if modules else None
+            }
+        except Exception:
+            return None
+    
+    def collect_linux_storage_info(self) -> Optional[Dict[str, Any]]:
+        """Collect Linux storage information."""
+        try:
+            disks = []
+            
+            # Get disk info from /proc/partitions
+            partitions = self._linux_read_file('/proc/partitions')
+            if partitions:
+                seen_disks = set()
+                for line in partitions.splitlines()[2:]:  # Skip header
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        device = parts[3]
+                        # Get base device (e.g., sda from sda1)
+                        base_device = ''.join(c for c in device if c.isalpha())
+                        if base_device and base_device not in seen_disks:
+                            seen_disks.add(base_device)
+                            # Get size from /sys/block
+                            size_file = f'/sys/block/{base_device}/size'
+                            size_sectors = self._linux_read_file(size_file)
+                            if size_sectors:
+                                try:
+                                    # Size is in 512-byte sectors
+                                    size_bytes = int(size_sectors) * 512
+                                    disks.append({
+                                        'name': base_device,
+                                        'size_bytes': size_bytes
+                                    })
+                                except ValueError:
+                                    pass
+            
+            # Try to get more info from lsblk or fdisk
+            result = self._linux_run_command(['lsblk', '-d', '-n', '-o', 'NAME,SIZE,MODEL,SERIAL'])
+            if result:
+                for line in result.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        disk_name = parts[0]
+                        # Find matching disk and add info
+                        for disk in disks:
+                            if disk['name'] == disk_name:
+                                if len(parts) >= 2:
+                                    disk['size_str'] = parts[1]
+                                if len(parts) >= 3:
+                                    disk['model'] = ' '.join(parts[2:-1]) if len(parts) > 3 else parts[2]
+                                if len(parts) >= 4:
+                                    disk['serial'] = parts[-1]
+                                break
+            
+            return {
+                'physical_disks': disks if disks else None
+            }
+        except Exception:
+            return None
+    
+    def collect_linux_video_info(self) -> Dict[str, Any]:
+        """Collect Linux video/GPU information."""
+        try:
+            gpus = []
+            
+            # Get GPU info from lspci
+            result = self._linux_run_command(['lspci'])
+            if result:
+                for line in result.splitlines():
+                    if 'VGA' in line or 'Display' in line or '3D' in line:
+                        gpus.append({
+                            'name': line.split(':')[2].strip() if ':' in line else line.strip()
+                        })
+            
+            # Also check /sys/class/drm for more details
+            drm_dir = '/sys/class/drm'
+            if os.path.isdir(drm_dir):
+                for item in os.listdir(drm_dir):
+                    if item.startswith('card') and not '-' in item:
+                        # Get GPU info
+                        device_path = os.path.join(drm_dir, item, 'device')
+                        if os.path.exists(device_path):
+                            vendor_file = os.path.join(device_path, 'vendor')
+                            device_file = os.path.join(device_path, 'device')
+                            vendor = self._linux_read_file(vendor_file)
+                            device = self._linux_read_file(device_file)
+                            if vendor and device:
+                                gpus.append({
+                                    'vendor_id': vendor,
+                                    'device_id': device
+                                })
+            
+            return {
+                'gpus': gpus if gpus else None
+            }
+        except Exception:
+            return {}
+    
+    def collect_linux_network_info(self) -> Dict[str, Any]:
+        """Collect Linux network information."""
+        try:
+            adapters = []
+            
+            # Get network interfaces from /sys/class/net
+            net_dir = '/sys/class/net'
+            if os.path.isdir(net_dir):
+                for interface in os.listdir(net_dir):
+                    if interface == 'lo':
+                        continue
+                    
+                    adapter = {'name': interface}
+                    
+                    # Get MAC address
+                    mac_file = os.path.join(net_dir, interface, 'address')
+                    mac = self._linux_read_file(mac_file)
+                    if mac:
+                        adapter['mac'] = mac.upper()
+                    
+                    # Get speed
+                    speed_file = os.path.join(net_dir, interface, 'speed')
+                    speed = self._linux_read_file(speed_file)
+                    if speed:
+                        try:
+                            adapter['speed'] = int(speed)
+                        except ValueError:
+                            pass
+                    
+                    # Check if wireless
+                    wireless_path = os.path.join(net_dir, interface, 'wireless')
+                    if os.path.exists(wireless_path):
+                        adapter['type'] = 'wifi'
+                    else:
+                        adapter['type'] = 'ethernet'
+                    
+                    # Get IP address from ip command
+                    result = self._linux_run_command(['ip', 'addr', 'show', interface])
+                    if result:
+                        import re
+                        ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', result)
+                        if ip_match:
+                            adapter['ip'] = ip_match.group(1)
+                    
+                    adapters.append(adapter)
+            
+            return {
+                'adapters': adapters if adapters else None
+            }
+        except Exception:
+            return {}
+    
+    def collect_linux_printer_info(self) -> Optional[Any]:
+        """Collect Linux printer information."""
+        try:
+            printers = []
+            
+            # Try lpstat
+            result = self._linux_run_command(['lpstat', '-p', '-d'])
+            if result:
+                for line in result.splitlines():
+                    if line.startswith('printer'):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            printers.append({
+                                'name': parts[1],
+                                'status': ' '.join(parts[2:]) if len(parts) > 2 else 'idle'
+                            })
+            
+            return printers if printers else None
+        except Exception:
+            return None
+    
+    def collect_linux_software_info(self) -> Optional[Any]:
+        """Collect Linux installed software information."""
+        try:
+            software = []
+            
+            # Try dpkg (Debian/Ubuntu)
+            result = self._linux_run_command(['dpkg', '-l'])
+            if result:
+                for line in result.splitlines()[5:]:  # Skip header
+                    if line.strip():
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            software.append({
+                                'name': parts[1],
+                                'version': parts[2],
+                                'source': 'dpkg'
+                            })
+                if software:
+                    return software[:100]  # Limit to 100
+            
+            # Try rpm (RedHat/CentOS)
+            result = self._linux_run_command(['rpm', '-qa', '--queryformat', '%{NAME}\t%{VERSION}\n'])
+            if result:
+                for line in result.splitlines():
+                    if '\t' in line:
+                        name, version = line.split('\t', 1)
+                        software.append({
+                            'name': name,
+                            'version': version,
+                            'source': 'rpm'
+                        })
+                if software:
+                    return software[:100]  # Limit to 100
+            
+            return None
+        except Exception:
+            return None
+    
+    def collect_linux_power_info(self) -> Optional[Dict[str, Any]]:
+        """Collect Linux power/battery information."""
+        try:
+            batteries = []
+            
+            # Check /sys/class/power_supply for batteries
+            power_dir = '/sys/class/power_supply'
+            if os.path.isdir(power_dir):
+                for item in os.listdir(power_dir):
+                    if 'BAT' in item.upper():
+                        battery = {'name': item}
+                        
+                        # Get battery info
+                        capacity_file = os.path.join(power_dir, item, 'capacity')
+                        capacity = self._linux_read_file(capacity_file)
+                        if capacity:
+                            try:
+                                battery['capacity_percent'] = int(capacity)
+                            except ValueError:
+                                pass
+                        
+                        energy_full_file = os.path.join(power_dir, item, 'energy_full')
+                        energy_full = self._linux_read_file(energy_full_file)
+                        if energy_full:
+                            try:
+                                # energy_full is in micro-watt-hours, convert to mWh
+                                battery['energy_full_mwh'] = int(energy_full) / 1000
+                            except ValueError:
+                                pass
+                        
+                        energy_now_file = os.path.join(power_dir, item, 'energy_now')
+                        energy_now = self._linux_read_file(energy_now_file)
+                        if energy_now:
+                            try:
+                                battery['energy_now_mwh'] = int(energy_now) / 1000
+                            except ValueError:
+                                pass
+                        
+                        manufacturer_file = os.path.join(power_dir, item, 'manufacturer')
+                        manufacturer = self._linux_read_file(manufacturer_file)
+                        if manufacturer:
+                            battery['manufacturer'] = manufacturer
+                        
+                        model_name_file = os.path.join(power_dir, item, 'model_name')
+                        model_name = self._linux_read_file(model_name_file)
+                        if model_name:
+                            battery['model_name'] = model_name
+                        
+                        batteries.append(battery)
+            
+            return {
+                'batteries': batteries if batteries else None
+            }
+        except Exception:
+            return None
+    
+    def collect_linux_controllers_info(self) -> Optional[Any]:
+        """Collect Linux controller information from lspci."""
+        try:
+            controllers = []
+            
+            # Get PCI devices
+            result = self._linux_run_command(['lspci'])
+            if result:
+                for line in result.splitlines():
+                    # Filter for controllers (USB, SATA, etc.)
+                    if any(keyword in line.lower() for keyword in ['usb', 'sata', 'ahci', 'nvme', 'pci bridge', 'ide', 'scsi', 'ethernet', 'network']):
+                        controllers.append({
+                            'name': line.split(':')[2].strip() if ':' in line else line.strip(),
+                            'pci_id': line.split()[0] if line.split() else None
+                        })
+            
+            # Get USB controllers
+            result = self._linux_run_command(['lsusb'])
+            if result:
+                for line in result.splitlines():
+                    if 'Host Controller' in line or 'Hub' in line:
+                        controllers.append({
+                            'name': line.split()[5:] if len(line.split()) > 5 else line.strip(),
+                            'type': 'USB'
+                        })
+            
+            return controllers if controllers else None
+        except Exception:
+            return None
+    
+    def collect_linux_monitors_info(self) -> Dict[str, Any]:
+        """Collect Linux monitor/display information."""
+        try:
+            monitors = []
+            
+            # Try xrandr for display info
+            result = self._linux_run_command(['xrandr', '--query'])
+            if result:
+                current_monitor = {}
+                for line in result.splitlines():
+                    if ' connected' in line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            current_monitor = {
+                                'name': parts[0],
+                                'status': 'connected'
+                            }
+                            # Try to extract resolution
+                            for part in parts:
+                                if 'x' in part and '+' in part:
+                                    resolution = part.split('+')[0]
+                                    current_monitor['resolution'] = resolution
+                                    break
+                            monitors.append(current_monitor)
+            
+            # Also check /sys/class/drm for EDID
+            drm_dir = '/sys/class/drm'
+            if os.path.isdir(drm_dir):
+                for item in os.listdir(drm_dir):
+                    if item.startswith('card') and '-' in item and 'eDP' not in item:
+                        edid_file = os.path.join(drm_dir, item, 'edid')
+                        if os.path.exists(edid_file):
+                            monitors.append({
+                                'name': item,
+                                'edid_available': True
+                            })
+            
+            return {
+                'monitors': monitors if monitors else None
+            }
+        except Exception:
+            return {}
+
+    def _collect_linux_enriched(self, categories: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Collect extended Linux inventory via /proc, /sys, dmidecode, etc.
+        
+        Args:
+            categories: Optional list of specific categories to collect.
+                       If None, collects all categories.
+                       Valid categories: 'os', 'hardware', 'cpu', 'memory', 'storage',
+                       'video', 'network', 'printers', 'software', 'power',
+                       'controllers', 'monitors'
+        
+        Returns:
+            Dictionary with collected inventory data
+        """
+        data: Dict[str, Any] = {}
+        collect_all = categories is None or len(categories) == 0
+        
+        # Map category names to methods
+        category_map = {
+            'os': ('operating_system', self.collect_linux_os_info),
+            'hardware': ('hardware_summary', self.collect_linux_hardware_summary),
+            'cpu': ('cpu', self.collect_linux_cpu_info),
+            'memory': ('memory', self.collect_linux_memory_info),
+            'storage': ('storage', self.collect_linux_storage_info),
+            'video': ('video', self.collect_linux_video_info),
+            'network': ('network_detail', self.collect_linux_network_info),
+            'printers': ('printers', self.collect_linux_printer_info),
+            'software': ('software', self.collect_linux_software_info),
+            'power': ('power', self.collect_linux_power_info),
+            'controllers': ('controllers', self.collect_linux_controllers_info),
+            'monitors': ('monitors', self.collect_linux_monitors_info),
+        }
+        
+        # Collect requested categories
+        for cat_key, (output_key, method) in category_map.items():
+            if collect_all or cat_key in categories:
+                try:
+                    result = method()
+                    if result is not None:
+                        data[output_key] = result
+                except Exception:
+                    pass  # Skip failed categories
+        
+        return data
 
     def _collect_windows_enriched(self, categories: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -2165,6 +3226,565 @@ class InventoryTask(BaseTask):
                                     glpi_content['CONTROLLERS'].append(ctrl_entry_alt)
                 except Exception:
                     pass
+            
+            # macOS data mapping (similar to Windows)
+            macos_data = data.get('macos', {})
+            if macos_data:
+                # OPERATINGSYSTEM - Override with macOS data if available
+                os_data = macos_data.get('operating_system', {})
+                if os_data:
+                    # Get OS name from system data (product_name from sw_vers)
+                    os_name = os_data.get('product_name', 'MacOSX')
+                    # Normalize common macOS names
+                    if 'macos' in os_name.lower() or 'mac os' in os_name.lower():
+                        os_name = 'MacOSX'
+                    
+                    glpi_content['OPERATINGSYSTEM'] = {
+                        'NAME': os_name,
+                        'FULL_NAME': os_data.get('product_name', 'macOS'),
+                        'VERSION': os_data.get('product_version', ''),
+                        'KERNEL_VERSION': os_data.get('kernel_version', ''),
+                        'ARCH': platform.machine(),
+                        'FQDN': data.get('network', {}).get('fqdn', socket.getfqdn()),
+                    }
+                
+                # HARDWARE - Update with macOS hardware summary
+                hw_summary = macos_data.get('hardware_summary', {})
+                if hw_summary:
+                    if hw_summary.get('manufacturer'):
+                        glpi_content['BIOS']['SMANUFACTURER'] = hw_summary['manufacturer']
+                    if hw_summary.get('model'):
+                        glpi_content['BIOS']['SMODEL'] = hw_summary['model']
+                    if hw_summary.get('serial_number'):
+                        glpi_content['BIOS']['SSN'] = hw_summary['serial_number']
+                    if hw_summary.get('model_identifier'):
+                        glpi_content['HARDWARE']['MODEL'] = hw_summary['model_identifier']
+                
+                # CPUS - Map from macOS CPU data
+                cpu_data = macos_data.get('cpu', {})
+                if cpu_data and isinstance(cpu_data, dict):
+                    # Parse speed from string like "2.6 GHz"
+                    speed = None
+                    speed_str = cpu_data.get('speed', '')
+                    if speed_str:
+                        import re
+                        match = re.match(r'([\d.]+)\s*(GHz|MHz)', speed_str, re.IGNORECASE)
+                        if match:
+                            value = float(match.group(1))
+                            unit = match.group(2).upper()
+                            if unit == 'GHZ':
+                                speed = int(value * 1000)  # Convert to MHz
+                            else:
+                                speed = int(value)
+                    
+                    cores = cpu_data.get('cores')
+                    if isinstance(cores, str):
+                        try:
+                            cores = int(cores)
+                        except ValueError:
+                            cores = None
+                    
+                    threads = cpu_data.get('threads')
+                    if isinstance(threads, str):
+                        try:
+                            threads = int(threads)
+                        except ValueError:
+                            threads = None
+                    
+                    num_procs = cpu_data.get('number_of_processors', 1)
+                    if isinstance(num_procs, str):
+                        try:
+                            num_procs = int(num_procs)
+                        except ValueError:
+                            num_procs = 1
+                    
+                    # Create one entry per processor
+                    glpi_content['CPUS'] = []
+                    for i in range(num_procs):
+                        cpu_entry = {
+                            'NAME': cpu_data.get('name', ''),
+                            'CORE': cores,
+                            'THREAD': threads,
+                        }
+                        if speed:
+                            cpu_entry['SPEED'] = speed
+                        glpi_content['CPUS'].append(cpu_entry)
+                
+                # MEMORIES - Map from macOS memory data
+                memory_data = macos_data.get('memory', {})
+                if memory_data and memory_data.get('total_bytes'):
+                    # Convert total bytes to MB for HARDWARE
+                    total_mb = int(memory_data['total_bytes'] / (1024 * 1024))
+                    glpi_content['HARDWARE']['MEMORY'] = total_mb
+                
+                # STORAGES - Map from macOS storage data
+                storage_data = macos_data.get('storage', {})
+                if storage_data:
+                    physical_disks = storage_data.get('physical_disks')
+                    if physical_disks and isinstance(physical_disks, list):
+                        glpi_content['STORAGES'] = []
+                        for disk in physical_disks:
+                            if isinstance(disk, dict):
+                                storage_entry = {
+                                    'NAME': disk.get('_name', disk.get('name', '')),
+                                    'MODEL': disk.get('_name', disk.get('name', '')),
+                                }
+                                # Try to extract size
+                                size_str = disk.get('size', disk.get('_size', ''))
+                                if size_str:
+                                    import re
+                                    match = re.match(r'([\d.]+)\s*(GB|MB|TB)', size_str, re.IGNORECASE)
+                                    if match:
+                                        value = float(match.group(1))
+                                        unit = match.group(2).upper()
+                                        if unit == 'TB':
+                                            size_mb = int(value * 1024 * 1024)
+                                        elif unit == 'GB':
+                                            size_mb = int(value * 1024)
+                                        else:
+                                            size_mb = int(value)
+                                        storage_entry['DISKSIZE'] = size_mb
+                                if storage_entry.get('NAME'):
+                                    glpi_content['STORAGES'].append(storage_entry)
+                
+                # VIDEOS - Map from macOS video data
+                video_data = macos_data.get('video', {})
+                gpus = video_data.get('gpus', []) if isinstance(video_data, dict) else []
+                if gpus:
+                    glpi_content['VIDEOS'] = []
+                    if not isinstance(gpus, list):
+                        gpus = [gpus]
+                    for vid in gpus:
+                        if isinstance(vid, dict):
+                            vid_entry = {}
+                            vid_name = vid.get('_name', vid.get('name', ''))
+                            if vid_name:
+                                vid_entry['NAME'] = str(vid_name).strip()
+                            # Try to extract VRAM
+                            vram_str = vid.get('VRAM', vid.get('vram', ''))
+                            if vram_str:
+                                import re
+                                match = re.match(r'([\d.]+)\s*(MB|GB)', vram_str, re.IGNORECASE)
+                                if match:
+                                    value = float(match.group(1))
+                                    unit = match.group(2).upper()
+                                    if unit == 'GB':
+                                        vid_entry['MEMORY'] = int(value * 1024)
+                                    else:
+                                        vid_entry['MEMORY'] = int(value)
+                            if vid_entry.get('NAME'):
+                                glpi_content['VIDEOS'].append(vid_entry)
+                
+                # NETWORKS - Map from macOS network data
+                network_data = macos_data.get('network_detail', {})
+                if network_data and isinstance(network_data, dict):
+                    adapters = network_data.get('adapters')
+                    if adapters and isinstance(adapters, list):
+                        # Parse ifconfig output for detailed network info
+                        ifconfig_data = network_data.get('ifconfig', '')
+                        if ifconfig_data:
+                            # Parse ifconfig output to extract interface details
+                            import re
+                            interfaces = {}
+                            current_if = None
+                            for line in ifconfig_data.splitlines():
+                                # Match interface name: "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500"
+                                match = re.match(r'^(\w+):', line)
+                                if match:
+                                    current_if = match.group(1)
+                                    interfaces[current_if] = {}
+                                elif current_if:
+                                    # Match MAC: "ether 00:11:22:33:44:55"
+                                    match = re.search(r'ether ([0-9a-f:]{17})', line, re.IGNORECASE)
+                                    if match:
+                                        interfaces[current_if]['MAC'] = match.group(1).upper()
+                                    # Match IP: "inet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255"
+                                    match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', line)
+                                    if match:
+                                        interfaces[current_if]['IPADDRESS'] = match.group(1)
+                            
+                            # Merge adapter data with ifconfig data
+                            for adapter in adapters:
+                                if isinstance(adapter, dict):
+                                    interface_name = adapter.get('_name', adapter.get('name', ''))
+                                    if interface_name and interface_name in interfaces:
+                                        ifconfig_info = interfaces[interface_name]
+                                        adapter.update(ifconfig_info)
+                        
+                        # Build network entries
+                        if not glpi_content.get('NETWORKS'):
+                            glpi_content['NETWORKS'] = []
+                        for adapter in adapters:
+                            if isinstance(adapter, dict):
+                                net_entry = {}
+                                desc = adapter.get('_name', adapter.get('name', ''))
+                                if desc:
+                                    net_entry['DESCRIPTION'] = str(desc).strip()
+                                if adapter.get('MAC'):
+                                    net_entry['MAC'] = str(adapter['MAC']).upper()
+                                if adapter.get('IPADDRESS'):
+                                    net_entry['IPADDRESS'] = str(adapter['IPADDRESS']).strip()
+                                # Determine type
+                                desc_upper = str(desc).upper() if desc else ''
+                                if 'WIFI' in desc_upper or 'WIRELESS' in desc_upper:
+                                    net_entry['TYPE'] = 'wifi'
+                                elif 'BLUETOOTH' in desc_upper:
+                                    net_entry['TYPE'] = 'bluetooth'
+                                elif 'ETHERNET' in desc_upper or 'THUNDERBOLT' in desc_upper:
+                                    net_entry['TYPE'] = 'ethernet'
+                                if net_entry.get('DESCRIPTION') or net_entry.get('MAC'):
+                                    glpi_content['NETWORKS'].append(net_entry)
+                
+                # PRINTERS - Map from macOS printer data
+                printers_data = macos_data.get('printers', [])
+                if printers_data:
+                    if not glpi_content.get('PRINTERS'):
+                        glpi_content['PRINTERS'] = []
+                    if not isinstance(printers_data, list):
+                        printers_data = [printers_data]
+                    for printer in printers_data:
+                        if isinstance(printer, dict):
+                            printer_entry = {}
+                            if printer.get('name'):
+                                printer_entry['NAME'] = str(printer['name']).strip()
+                            if printer.get('status'):
+                                printer_entry['STATUS'] = str(printer['status']).strip()
+                            if printer_entry.get('NAME'):
+                                glpi_content['PRINTERS'].append(printer_entry)
+                
+                # BATTERIES - Map from macOS power data
+                power_data = macos_data.get('power', {})
+                batteries = power_data.get('batteries', []) if power_data else []
+                if batteries:
+                    if not glpi_content.get('BATTERIES'):
+                        glpi_content['BATTERIES'] = []
+                    if not isinstance(batteries, list):
+                        batteries = [batteries]
+                    for bat in batteries:
+                        if isinstance(bat, dict):
+                            bat_entry = {}
+                            # Extract battery info
+                            model_info = bat.get('Model Information', bat.get('model_information', {}))
+                            charge_info = bat.get('Charge Information', bat.get('charge_information', {}))
+                            
+                            device_name = model_info.get('Device Name', model_info.get('device_name', 'Primary'))
+                            bat_entry['NAME'] = device_name
+                            
+                            if model_info.get('Manufacturer', model_info.get('manufacturer')):
+                                bat_entry['MANUFACTURER'] = str(model_info.get('Manufacturer', model_info.get('manufacturer', ''))).strip()
+                            if model_info.get('Serial Number', model_info.get('serial_number')):
+                                bat_entry['SERIAL'] = str(model_info.get('Serial Number', model_info.get('serial_number', ''))).strip()
+                            
+                            # Capacity
+                            full_capacity = charge_info.get('Full Charge Capacity (mAh)', charge_info.get('full_charge_capacity_mah'))
+                            if full_capacity:
+                                try:
+                                    bat_entry['CAPACITY'] = int(full_capacity)
+                                    bat_entry['REAL_CAPACITY'] = int(full_capacity)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            # Voltage
+                            voltage = bat.get('Voltage (mV)', bat.get('voltage_mv'))
+                            if voltage:
+                                try:
+                                    bat_entry['VOLTAGE'] = int(voltage)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            if bat_entry.get('NAME'):
+                                glpi_content['BATTERIES'].append(bat_entry)
+                
+                # MONITORS - Map from macOS monitor data
+                monitors_data = macos_data.get('monitors', {})
+                if monitors_data:
+                    displays = monitors_data.get('displays', [])
+                    if displays:
+                        if not glpi_content.get('MONITORS'):
+                            glpi_content['MONITORS'] = []
+                        if not isinstance(displays, list):
+                            displays = [displays]
+                        for display in displays:
+                            if isinstance(display, dict):
+                                monitor_entry = {}
+                                name = display.get('_name', display.get('name', 'Display'))
+                                if name:
+                                    monitor_entry['NAME'] = str(name).strip()
+                                    monitor_entry['CAPTION'] = str(name).strip()
+                                resolution = display.get('Resolution', display.get('resolution', ''))
+                                if resolution:
+                                    monitor_entry['RESOLUTION'] = str(resolution).strip()
+                                if monitor_entry.get('NAME'):
+                                    glpi_content['MONITORS'].append(monitor_entry)
+                
+                # CONTROLLERS - Map from macOS controller data
+                controllers_data = macos_data.get('controllers', [])
+                if controllers_data:
+                    if not glpi_content.get('CONTROLLERS'):
+                        glpi_content['CONTROLLERS'] = []
+                    if not isinstance(controllers_data, list):
+                        controllers_data = [controllers_data]
+                    for controller in controllers_data:
+                        if isinstance(controller, dict):
+                            ctrl_entry = {}
+                            name = controller.get('_name', controller.get('name', ''))
+                            if name:
+                                ctrl_entry['NAME'] = str(name).strip()
+                            # Determine type from name
+                            name_upper = str(name).upper() if name else ''
+                            if 'USB' in name_upper:
+                                ctrl_entry['TYPE'] = 'USB'
+                            elif 'PCI' in name_upper:
+                                ctrl_entry['TYPE'] = 'PCI'
+                            elif 'SATA' in name_upper or 'AHCI' in name_upper:
+                                ctrl_entry['TYPE'] = 'SATA'
+                            elif 'NVME' in name_upper:
+                                ctrl_entry['TYPE'] = 'NVMe'
+                            elif 'THUNDERBOLT' in name_upper:
+                                ctrl_entry['TYPE'] = 'Thunderbolt'
+                            else:
+                                ctrl_entry['TYPE'] = 'Other'
+                            if ctrl_entry.get('NAME'):
+                                glpi_content['CONTROLLERS'].append(ctrl_entry)
+            
+            # Linux data mapping (similar to Windows and macOS)
+            linux_data = data.get('linux', {})
+            if linux_data:
+                # OPERATINGSYSTEM - Override with Linux data if available
+                os_data = linux_data.get('operating_system', {})
+                if os_data:
+                    os_name = os_data.get('name', 'Linux')
+                    if not os_name or os_name == 'Linux':
+                        # Try to get from os-release
+                        os_name = os_data.get('pretty_name', os_data.get('id', 'Linux'))
+                    
+                    glpi_content['OPERATINGSYSTEM'] = {
+                        'NAME': os_name,
+                        'FULL_NAME': os_data.get('pretty_name', os_name),
+                        'VERSION': os_data.get('version_id', ''),
+                        'KERNEL_VERSION': os_data.get('kernel_version', ''),
+                        'ARCH': platform.machine(),
+                        'FQDN': data.get('network', {}).get('fqdn', socket.getfqdn()),
+                    }
+                
+                # HARDWARE - Update with Linux hardware summary
+                hw_summary = linux_data.get('hardware_summary', {})
+                if hw_summary:
+                    if hw_summary.get('manufacturer'):
+                        glpi_content['BIOS']['SMANUFACTURER'] = hw_summary['manufacturer']
+                        glpi_content['BIOS']['BMANUFACTURER'] = hw_summary.get('bios_vendor') or hw_summary['manufacturer']
+                    if hw_summary.get('model'):
+                        glpi_content['BIOS']['SMODEL'] = hw_summary['model']
+                    if hw_summary.get('serial_number'):
+                        glpi_content['BIOS']['SSN'] = hw_summary['serial_number']
+                    if hw_summary.get('bios_version'):
+                        glpi_content['BIOS']['BVERSION'] = hw_summary['bios_version']
+                    if hw_summary.get('bios_date'):
+                        # Format BIOS date (usually YYYY/MM/DD or similar)
+                        bios_date = hw_summary['bios_date']
+                        try:
+                            # Try to parse and format date
+                            import re
+                            date_match = re.match(r'(\d{4})[/-](\d{2})[/-](\d{2})', bios_date)
+                            if date_match:
+                                glpi_content['BIOS']['BDATE'] = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+                            else:
+                                glpi_content['BIOS']['BDATE'] = bios_date
+                        except Exception:
+                            pass
+                    if hw_summary.get('chassis_type'):
+                        glpi_content['HARDWARE']['CHASSIS_TYPE'] = hw_summary['chassis_type']
+                
+                # CPUS - Map from Linux CPU data
+                cpu_data = linux_data.get('cpu', {})
+                if cpu_data and isinstance(cpu_data, dict):
+                    speed = cpu_data.get('speed')
+                    glpi_content['CPUS'] = [{
+                        'NAME': cpu_data.get('name', ''),
+                        'CORE': cpu_data.get('cores'),
+                        'THREAD': cpu_data.get('threads'),
+                        'SPEED': speed,
+                    }]
+                
+                # MEMORIES - Map from Linux memory data
+                memory_data = linux_data.get('memory', {})
+                if memory_data:
+                    if memory_data.get('total_bytes'):
+                        total_mb = int(memory_data['total_bytes'] / (1024 * 1024))
+                        glpi_content['HARDWARE']['MEMORY'] = total_mb
+                    
+                    memory_modules = memory_data.get('modules', [])
+                    if memory_modules:
+                        if not glpi_content.get('MEMORIES'):
+                            glpi_content['MEMORIES'] = []
+                        for mem in memory_modules:
+                            if isinstance(mem, dict):
+                                mem_entry = {}
+                                if mem.get('size_mb'):
+                                    mem_entry['CAPACITY'] = mem['size_mb']
+                                if mem.get('manufacturer'):
+                                    mem_entry['MANUFACTURER'] = str(mem['manufacturer']).strip()
+                                if mem.get('serial'):
+                                    mem_entry['SERIALNUMBER'] = str(mem['serial']).strip()
+                                if mem.get('part_number'):
+                                    mem_entry['MODEL'] = str(mem['part_number']).strip()
+                                if mem.get('speed'):
+                                    mem_entry['SPEED'] = str(mem['speed'])
+                                if mem_entry:
+                                    glpi_content['MEMORIES'].append(mem_entry)
+                
+                # STORAGES - Map from Linux storage data
+                storage_data = linux_data.get('storage', {})
+                if storage_data:
+                    physical_disks = storage_data.get('physical_disks', [])
+                    if physical_disks:
+                        if not glpi_content.get('STORAGES'):
+                            glpi_content['STORAGES'] = []
+                        for disk in physical_disks:
+                            if isinstance(disk, dict):
+                                storage_entry = {}
+                                if disk.get('name'):
+                                    storage_entry['NAME'] = str(disk['name']).strip()
+                                if disk.get('model'):
+                                    storage_entry['MODEL'] = str(disk['model']).strip()
+                                if disk.get('size_bytes'):
+                                    storage_entry['DISKSIZE'] = int(disk['size_bytes'] / (1024 * 1024))
+                                if disk.get('serial'):
+                                    storage_entry['SERIAL'] = str(disk['serial']).strip()
+                                if storage_entry.get('NAME'):
+                                    glpi_content['STORAGES'].append(storage_entry)
+                
+                # VIDEOS - Map from Linux video data
+                video_data = linux_data.get('video', {})
+                gpus = video_data.get('gpus', []) if isinstance(video_data, dict) else []
+                if gpus:
+                    if not glpi_content.get('VIDEOS'):
+                        glpi_content['VIDEOS'] = []
+                    if not isinstance(gpus, list):
+                        gpus = [gpus]
+                    for vid in gpus:
+                        if isinstance(vid, dict):
+                            vid_entry = {}
+                            if vid.get('name'):
+                                vid_entry['NAME'] = str(vid['name']).strip()
+                            if vid_entry.get('NAME'):
+                                glpi_content['VIDEOS'].append(vid_entry)
+                
+                # NETWORKS - Map from Linux network data
+                network_data = linux_data.get('network_detail', {})
+                if network_data and isinstance(network_data, dict):
+                    adapters = network_data.get('adapters', [])
+                    if adapters:
+                        if not glpi_content.get('NETWORKS'):
+                            glpi_content['NETWORKS'] = []
+                        for adapter in adapters:
+                            if isinstance(adapter, dict):
+                                net_entry = {}
+                                if adapter.get('name'):
+                                    net_entry['DESCRIPTION'] = str(adapter['name']).strip()
+                                if adapter.get('mac'):
+                                    net_entry['MAC'] = str(adapter['mac']).upper()
+                                if adapter.get('ip'):
+                                    net_entry['IPADDRESS'] = str(adapter['ip']).strip()
+                                if adapter.get('type'):
+                                    net_entry['TYPE'] = str(adapter['type']).strip()
+                                if adapter.get('speed'):
+                                    net_entry['SPEED'] = str(adapter['speed'])
+                                if net_entry.get('DESCRIPTION') or net_entry.get('MAC'):
+                                    glpi_content['NETWORKS'].append(net_entry)
+                
+                # PRINTERS - Map from Linux printer data
+                printers_data = linux_data.get('printers', [])
+                if printers_data:
+                    if not glpi_content.get('PRINTERS'):
+                        glpi_content['PRINTERS'] = []
+                    if not isinstance(printers_data, list):
+                        printers_data = [printers_data]
+                    for printer in printers_data:
+                        if isinstance(printer, dict):
+                            printer_entry = {}
+                            if printer.get('name'):
+                                printer_entry['NAME'] = str(printer['name']).strip()
+                            if printer.get('status'):
+                                printer_entry['STATUS'] = str(printer['status']).strip()
+                            if printer_entry.get('NAME'):
+                                glpi_content['PRINTERS'].append(printer_entry)
+                
+                # BATTERIES - Map from Linux power data
+                power_data = linux_data.get('power', {})
+                batteries = power_data.get('batteries', []) if power_data else []
+                if batteries:
+                    if not glpi_content.get('BATTERIES'):
+                        glpi_content['BATTERIES'] = []
+                    if not isinstance(batteries, list):
+                        batteries = [batteries]
+                    for bat in batteries:
+                        if isinstance(bat, dict):
+                            bat_entry = {}
+                            if bat.get('name'):
+                                bat_entry['NAME'] = str(bat['name']).strip()
+                            if bat.get('manufacturer'):
+                                bat_entry['MANUFACTURER'] = str(bat['manufacturer']).strip()
+                            if bat.get('model_name'):
+                                bat_entry['SERIAL'] = str(bat['model_name']).strip()
+                            if bat.get('energy_full_mwh'):
+                                try:
+                                    bat_entry['CAPACITY'] = int(bat['energy_full_mwh'])
+                                    bat_entry['REAL_CAPACITY'] = int(bat.get('energy_now_mwh', bat['energy_full_mwh']))
+                                except (ValueError, TypeError):
+                                    pass
+                            if bat_entry.get('NAME'):
+                                glpi_content['BATTERIES'].append(bat_entry)
+                
+                # CONTROLLERS - Map from Linux controller data
+                controllers_data = linux_data.get('controllers', [])
+                if controllers_data:
+                    if not glpi_content.get('CONTROLLERS'):
+                        glpi_content['CONTROLLERS'] = []
+                    if not isinstance(controllers_data, list):
+                        controllers_data = [controllers_data]
+                    for controller in controllers_data:
+                        if isinstance(controller, dict):
+                            ctrl_entry = {}
+                            if controller.get('name'):
+                                ctrl_entry['NAME'] = str(controller['name']).strip()
+                            if controller.get('type'):
+                                ctrl_entry['TYPE'] = str(controller['type']).strip()
+                            else:
+                                # Determine type from name
+                                name_upper = str(controller.get('name', '')).upper()
+                                if 'USB' in name_upper:
+                                    ctrl_entry['TYPE'] = 'USB'
+                                elif 'PCI' in name_upper:
+                                    ctrl_entry['TYPE'] = 'PCI'
+                                elif 'SATA' in name_upper or 'AHCI' in name_upper:
+                                    ctrl_entry['TYPE'] = 'SATA'
+                                elif 'NVME' in name_upper:
+                                    ctrl_entry['TYPE'] = 'NVMe'
+                                else:
+                                    ctrl_entry['TYPE'] = 'Other'
+                            if ctrl_entry.get('NAME'):
+                                glpi_content['CONTROLLERS'].append(ctrl_entry)
+                
+                # MONITORS - Map from Linux monitor data
+                monitors_data = linux_data.get('monitors', {})
+                if monitors_data:
+                    displays = monitors_data.get('monitors', [])
+                    if displays:
+                        if not glpi_content.get('MONITORS'):
+                            glpi_content['MONITORS'] = []
+                        if not isinstance(displays, list):
+                            displays = [displays]
+                        for display in displays:
+                            if isinstance(display, dict):
+                                monitor_entry = {}
+                                if display.get('name'):
+                                    monitor_entry['NAME'] = str(display['name']).strip()
+                                    monitor_entry['CAPTION'] = str(display['name']).strip()
+                                if display.get('resolution'):
+                                    monitor_entry['RESOLUTION'] = str(display['resolution']).strip()
+                                if monitor_entry.get('NAME'):
+                                    glpi_content['MONITORS'].append(monitor_entry)
             
             # Message structure matching Perl Protocol::Inventory format
             message_data = {
