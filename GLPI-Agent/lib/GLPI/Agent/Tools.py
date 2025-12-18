@@ -621,16 +621,23 @@ def get_file_handle(command: Union[str, List[str]] = None,
                 env.pop('LD_LIBRARY_PATH', None)
                 env.pop('LD_PRELOAD', None)
             
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            
             if isinstance(command, list):
                 proc = subprocess.Popen(
                     command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    text=True, env=env, encoding='utf-8', errors='replace'
+                    text=True, env=env, encoding='utf-8', errors='replace',
+                    creationflags=creation_flags
                 )
             else:
                 proc = subprocess.Popen(
                     command, shell=True, stdout=subprocess.PIPE, 
                     stderr=subprocess.DEVNULL, text=True, env=env,
-                    encoding='utf-8', errors='replace'
+                    encoding='utf-8', errors='replace',
+                    creationflags=creation_flags
                 )
             
             return proc.stdout

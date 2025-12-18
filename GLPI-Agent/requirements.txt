@@ -5,6 +5,9 @@
 # HTTP client for server communication
 requests>=2.25.0
 
+# Windows service support (required for Windows service functionality)
+pywin32>=300; sys_platform == 'win32'
+
 # Optional dependencies (required for specific features)
 # SNMP support (for network inventory/discovery)
 # pysnmp>=4.4.12

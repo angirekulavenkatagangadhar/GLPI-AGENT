@@ -204,13 +204,17 @@ class InventoryTask(GLPITask):
         
         tag = self.config.get('tag')
         
+        # Get storage directory safely
+        storage = self.target.getStorage() if self.target else None
+        statedir = storage.getDirectory() if storage and hasattr(storage, 'getDirectory') else ''
+        
         # Create inventory object
         self.inventory = Inventory(
-            statedir=self.target.getStorage().getDirectory(),
+            statedir=statedir,
             deviceid=self.deviceid,
             datadir=self.datadir,
             logger=self.logger,
-            glpi=self.target.getTaskVersion('inventory'),
+            glpi=self.target.getTaskVersion('inventory') if self.target else '',
             required=self.config.get('required-category', []),
             itemtype=(
                 "Computer" if empty(self.config.get('itemtype')) 
@@ -220,7 +224,7 @@ class InventoryTask(GLPITask):
         )
         
         # Log inventory start
-        event = self.event()
+        event = self._event if hasattr(self, '_event') else None
         name = getattr(event, 'name', 'inventory') if event else "inventory"
         tag_suffix = f" (tag={tag})" if tag else ""
         
@@ -320,10 +324,12 @@ class InventoryTask(GLPITask):
             return False
         
         # Set full/partial status
+        event_get = getattr(event, 'get', None) if hasattr(event, 'get') else None
+        event_get_func = event_get if callable(event_get) else (lambda x: False)
         is_full = (
             not getattr(event, 'partial', False) and
             getattr(event, 'taskrun', False) and
-            (getattr(event, 'get', lambda x: False)("full") if hasattr(event, 'get') else False)
+            event_get_func("full")
         )
         self.inventory.isFull(is_full)
         self.inventory.isPartial(not self.inventory.isFull())

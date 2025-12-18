@@ -109,6 +109,18 @@ class Softwares(InventoryModule):
                         for package in packages:
                             self._add_software(inventory=inventory, entry=package)
         
+        # Collect software from Program Files directories (portable apps, etc.)
+        program_files_software = self._get_program_files_software(logger=logger, is64bit=is_64bit)
+        if program_files_software:
+            for software in program_files_software:
+                self._add_software(inventory=inventory, entry=software)
+        
+        # Collect from additional registry locations
+        additional_software = self._get_additional_registry_software(is64bit=is_64bit, logger=logger)
+        if additional_software:
+            for software in additional_software:
+                self._add_software(inventory=inventory, entry=software)
+        
         # Reset seen hash
         _seen = {}
     
@@ -425,16 +437,274 @@ class Softwares(InventoryModule):
         return instance_versions.get('/Edition')
     
     def _get_appx_packages(self, **params):
+        """Get UWP/Windows Store AppX packages"""
         if not can_run('powershell'):
             return None
         
         logger = params.get('logger')
         
-        # The PowerShell script would be very long to include here
-        # For now, return None as this requires extensive PowerShell integration
-        # In production, you'd need to implement the full PowerShell script
+        try:
+            # Use PowerShell to get all AppX packages
+            ps_script = '''
+            $packages = @()
+            try {
+                # Get all AppX packages for all users
+                $allPackages = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+                foreach ($pkg in $allPackages) {
+                    $packages += [PSCustomObject]@{
+                        Name = $pkg.Name
+                        Publisher = $pkg.Publisher
+                        Version = $pkg.Version.ToString()
+                        InstallDate = if ($pkg.InstallDate) { $pkg.InstallDate.ToString('yyyyMMdd') } else { $null }
+                        Architecture = $pkg.Architecture
+                    }
+                }
+                
+                # Also get provisioned packages
+                $provisioned = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+                foreach ($pkg in $provisioned) {
+                    $packages += [PSCustomObject]@{
+                        Name = $pkg.DisplayName
+                        Publisher = $pkg.Publisher
+                        Version = $pkg.Version.ToString()
+                        InstallDate = $null
+                        Architecture = $pkg.Architecture
+                    }
+                }
+            } catch {
+                # Fallback: try Get-AppxPackage without -AllUsers
+                try {
+                    $allPackages = Get-AppxPackage -ErrorAction SilentlyContinue
+                    foreach ($pkg in $allPackages) {
+                        $packages += [PSCustomObject]@{
+                            Name = $pkg.Name
+                            Publisher = $pkg.Publisher
+                            Version = $pkg.Version.ToString()
+                            InstallDate = if ($pkg.InstallDate) { $pkg.InstallDate.ToString('yyyyMMdd') } else { $null }
+                            Architecture = $pkg.Architecture
+                        }
+                    }
+                } catch { }
+            }
+            $packages | ConvertTo-Json -Depth 10
+            '''
+            
+            # Run PowerShell and parse JSON output
+            import subprocess
+            import json as json_lib
+            
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', f"{ps_script}"],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            
+            try:
+                json_output = json_lib.loads(result.stdout.strip())
+            except json_lib.JSONDecodeError:
+                if logger:
+                    logger.debug("Failed to parse AppX packages JSON output")
+                return None
+            
+            packages = []
+            if isinstance(json_output, list):
+                for pkg in json_output:
+                    if isinstance(pkg, dict) and pkg.get('Name'):
+                        packages.append({
+                            'NAME': pkg.get('Name', ''),
+                            'PUBLISHER': pkg.get('Publisher', ''),
+                            'VERSION': pkg.get('Version', ''),
+                            'INSTALLDATE': self._date_format(pkg.get('InstallDate')),
+                            'ARCH': pkg.get('Architecture', 'x86_64'),
+                            'FROM': 'AppX',
+                            'SYSTEM_CATEGORY': CATEGORY_APPLICATION
+                        })
+            elif isinstance(json_output, dict) and json_output.get('Name'):
+                pkg = json_output
+                packages.append({
+                    'NAME': pkg.get('Name', ''),
+                    'PUBLISHER': pkg.get('Publisher', ''),
+                    'VERSION': pkg.get('Version', ''),
+                    'INSTALLDATE': self._date_format(pkg.get('InstallDate')),
+                    'ARCH': pkg.get('Architecture', 'x86_64'),
+                    'FROM': 'AppX',
+                    'SYSTEM_CATEGORY': CATEGORY_APPLICATION
+                })
+            
+            if logger and packages:
+                logger.debug(f"Found {len(packages)} AppX/UWP packages")
+            
+            return packages
+            
+        except Exception as e:
+            if logger:
+                logger.debug(f"Error collecting AppX packages: {e}")
+            return None
+    
+    def _get_program_files_software(self, **params):
+        """Get software from Program Files directories (for portable apps and non-registry software)"""
+        logger = params.get('logger')
+        is_64bit = params.get('is64bit', True)
         
-        if logger:
-            logger.debug("UWP/AppX package inventory not yet implemented in Python version")
+        if not can_run('powershell'):
+            return None
         
-        return None
+        try:
+            ps_script = '''
+            $software = @()
+            $programPaths = @()
+            
+            # Add standard Program Files paths
+            if (Test-Path "$env:ProgramFiles") {
+                $programPaths += "$env:ProgramFiles"
+            }
+            if (Test-Path "${env:ProgramFiles(x86)}") {
+                $programPaths += "${env:ProgramFiles(x86)}"
+            }
+            if (Test-Path "$env:ProgramData") {
+                $programPaths += "$env:ProgramData"
+            }
+            
+            foreach ($path in $programPaths) {
+                try {
+                    $dirs = Get-ChildItem -Path $path -Directory -ErrorAction SilentlyContinue | Where-Object {
+                        # Skip common system directories
+                        $_.Name -notmatch '^(Windows|Common Files|Internet Explorer|Windows Defender|Windows Mail|Windows Media Player|Windows NT|Windows Photo Viewer|WindowsPowerShell|Microsoft|Intel|AMD|NVIDIA)$'
+                    }
+                    
+                    foreach ($dir in $dirs) {
+                        # Look for executable files that might indicate software
+                        $exeFiles = Get-ChildItem -Path $dir.FullName -Filter "*.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | 
+                            Where-Object { $_.Name -notlike "*uninstall*" -and $_.Name -notlike "*setup*" -and $_.Name -notlike "*install*" }
+                        
+                        if ($exeFiles) {
+                            $mainExe = $exeFiles | Select-Object -First 1
+                            $versionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($mainExe.FullName)
+                            
+                            $name = if ($versionInfo.FileDescription -and $versionInfo.FileDescription.Trim()) {
+                                $versionInfo.FileDescription
+                            } elseif ($versionInfo.ProductName -and $versionInfo.ProductName.Trim()) {
+                                $versionInfo.ProductName
+                            } else {
+                                $dir.Name
+                            }
+                            
+                            $version = if ($versionInfo.FileVersion -and $versionInfo.FileVersion.Trim()) {
+                                $versionInfo.FileVersion
+                            } elseif ($versionInfo.ProductVersion -and $versionInfo.ProductVersion.Trim()) {
+                                $versionInfo.ProductVersion
+                            } else {
+                                $null
+                            }
+                            
+                            $publisher = if ($versionInfo.CompanyName -and $versionInfo.CompanyName.Trim()) {
+                                $versionInfo.CompanyName
+                            } else {
+                                $null
+                            }
+                            
+                            # Only add if we have a meaningful name and it's not already in registry
+                            if ($name -and $name -ne $dir.Name -and $name.Length -gt 2) {
+                                $software += [PSCustomObject]@{
+                                    Name = $name
+                                    Version = $version
+                                    Publisher = $publisher
+                                    InstallPath = $dir.FullName
+                                    InstallDate = (Get-Item $dir.FullName).CreationTime.ToString('yyyyMMdd')
+                                }
+                            }
+                        }
+                    }
+                } catch { }
+            }
+            
+            $software | Select-Object -Unique -Property Name,Version,Publisher,InstallPath,InstallDate | ConvertTo-Json -Depth 10
+            '''
+            
+            # Run PowerShell and parse JSON output
+            import subprocess
+            import json as json_lib
+            
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', f"{ps_script}"],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            
+            try:
+                json_output = json_lib.loads(result.stdout.strip())
+            except json_lib.JSONDecodeError:
+                if logger:
+                    logger.debug("Failed to parse Program Files software JSON output")
+                return None
+            
+            software_list = []
+            results = json_output if isinstance(json_output, list) else [json_output] if json_output else []
+            
+            for item in results:
+                if isinstance(item, dict) and item.get('Name'):
+                    software_list.append({
+                        'NAME': item.get('Name', ''),
+                        'VERSION': item.get('Version', ''),
+                        'PUBLISHER': item.get('Publisher', ''),
+                        'INSTALLDATE': self._date_format(item.get('InstallDate')),
+                        'ARCH': 'x86_64' if is_64bit else 'i586',
+                        'FROM': 'ProgramFiles',
+                        'SYSTEM_CATEGORY': CATEGORY_APPLICATION,
+                        'COMMENTS': f"Found in: {item.get('InstallPath', '')}"
+                    })
+            
+            if logger and software_list:
+                logger.debug(f"Found {len(software_list)} software items from Program Files")
+            
+            return software_list
+            
+        except Exception as e:
+            if logger:
+                logger.debug(f"Error collecting Program Files software: {e}")
+            return None
+    
+    def _get_additional_registry_software(self, **params):
+        """Get software from additional registry locations"""
+        is_64bit = params.get('is64bit', True)
+        logger = params.get('logger')
+        
+        additional_paths = []
+        
+        # Add user-specific registry paths if we can
+        try:
+            # HKEY_CURRENT_USER software (for current user)
+            if is_64bit:
+                additional_paths.append("HKEY_CURRENT_USER/SOFTWARE/Microsoft/Windows/CurrentVersion/Uninstall")
+                additional_paths.append("HKEY_CURRENT_USER/SOFTWARE/Wow6432Node/Microsoft/Windows/CurrentVersion/Uninstall")
+            else:
+                additional_paths.append("HKEY_CURRENT_USER/SOFTWARE/Microsoft/Windows/CurrentVersion/Uninstall")
+        except:
+            pass
+        
+        software_list = []
+        
+        for path in additional_paths:
+            try:
+                softwares = self._get_softwares_list(
+                    path=path,
+                    is64bit=is_64bit
+                ) or []
+                software_list.extend(softwares)
+            except Exception as e:
+                if logger:
+                    logger.debug(f"Error reading registry path {path}: {e}")
+                continue
+        
+        if logger and software_list:
+            logger.debug(f"Found {len(software_list)} additional software items from registry")
+        
+        return software_list

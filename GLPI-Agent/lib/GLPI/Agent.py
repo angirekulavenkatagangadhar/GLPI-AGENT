@@ -632,8 +632,12 @@ class InventoryTask(BaseTask):
        
         if platform.system() == 'Linux':
             try:
+                # Suppress console window on Windows (though this is Linux-specific)
+                creation_flags = 0
+                if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                    creation_flags = subprocess.CREATE_NO_WINDOW
                 result = subprocess.run(['dpkg', '-l'],
-                                      capture_output=True, text=True, timeout=30)
+                                      capture_output=True, text=True, timeout=30, creationflags=creation_flags)
                 if result.returncode == 0:
                     for line in result.stdout.split('\n')[5:]:
                         if line.strip():
@@ -663,7 +667,12 @@ class InventoryTask(BaseTask):
             f"{command} | ConvertTo-Json -Depth {depth}"
         ]
         try:
-            result = subprocess.run(ps, capture_output=True, text=True, timeout=60)
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            
+            result = subprocess.run(ps, capture_output=True, text=True, timeout=60, creationflags=creation_flags)
             if result.returncode != 0:
                 return None
             txt = result.stdout.strip()
@@ -690,15 +699,47 @@ class InventoryTask(BaseTask):
                     uptime_seconds = int(float(up)) if up is not None else None
                 except Exception:
                     pass
+            # Get RegisteredOwner from registry
+            registered_owner = None
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+                try:
+                    registered_owner = winreg.QueryValueEx(key, "RegisteredOwner")[0]
+                except:
+                    pass
+                finally:
+                    winreg.CloseKey(key)
+            except:
+                pass
+            
+            # Get DisplayVersion or ReleaseId for Windows 10/11
+            display_version = None
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+                try:
+                    display_version = winreg.QueryValueEx(key, "DisplayVersion")[0]
+                except:
+                    try:
+                        display_version = winreg.QueryValueEx(key, "ReleaseId")[0]
+                    except:
+                        pass
+                finally:
+                    winreg.CloseKey(key)
+            except:
+                pass
+            
             return {
                 'caption': os_info.get('Caption'),
-                'version': os_info.get('Version'),
+                'version': display_version or os_info.get('Version'),
                 'build_number': os_info.get('BuildNumber'),
                 'architecture': os_info.get('OSArchitecture'),
                 'install_date': install_date,
                 'last_boot': last_boot,
                 'uptime_seconds': uptime_seconds,
-                'boot_device': os_info.get('BootDevice')
+                'boot_device': os_info.get('BootDevice'),
+                'registered_owner': registered_owner
             }
         except Exception:
             return None
@@ -1160,7 +1201,11 @@ class InventoryTask(BaseTask):
     def _macos_json(self, command: List[str]) -> Any:
         """Run a macOS command and parse JSON output."""
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, creationflags=creation_flags)
             if result.returncode != 0:
                 return None
             txt = result.stdout.strip()
@@ -1171,7 +1216,11 @@ class InventoryTask(BaseTask):
     def _macos_plist(self, command: List[str]) -> Any:
         """Run a macOS command and parse plist output."""
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, creationflags=creation_flags)
             if result.returncode != 0:
                 return None
             txt = result.stdout.strip()
@@ -1184,9 +1233,13 @@ class InventoryTask(BaseTask):
     def _macos_system_profiler(self, data_type: str) -> Dict[str, Any]:
         """Get system_profiler data as structured dict."""
         try:
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
                 ['/usr/sbin/system_profiler', data_type, '-xml'],
-                capture_output=True, text=True, timeout=60
+                capture_output=True, text=True, timeout=60, creationflags=creation_flags
             )
             if result.returncode != 0:
                 return {}
@@ -1204,7 +1257,11 @@ class InventoryTask(BaseTask):
                 cmd.extend(['-c', entry])
             if key:
                 cmd.extend(['-k', key])
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=creation_flags)
             if result.returncode != 0:
                 return None
             txt = result.stdout.strip()
@@ -1216,9 +1273,13 @@ class InventoryTask(BaseTask):
         """Collect macOS OS information."""
         try:
             # Get system version
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
                 ['sw_vers'],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10, creationflags=creation_flags
             )
             os_info = {}
             if result.returncode == 0:
@@ -1231,7 +1292,7 @@ class InventoryTask(BaseTask):
             # Get kernel version
             result = subprocess.run(
                 ['uname', '-r'],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10, creationflags=creation_flags
             )
             if result.returncode == 0:
                 os_info['kernel_version'] = result.stdout.strip()
@@ -1239,7 +1300,7 @@ class InventoryTask(BaseTask):
             # Get boot time
             result = subprocess.run(
                 ['sysctl', '-n', 'kern.boottime'],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10, creationflags=creation_flags
             )
             if result.returncode == 0:
                 import re
@@ -1288,9 +1349,13 @@ class InventoryTask(BaseTask):
                 return None
             
             # Get additional CPU info from sysctl
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
                 ['sysctl', '-a', 'machdep.cpu'],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10, creationflags=creation_flags
             )
             sysctl_info = {}
             if result.returncode == 0:
@@ -1360,9 +1425,13 @@ class InventoryTask(BaseTask):
                         disks.append(value)
             
             # Also get from diskutil
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
                 ['diskutil', 'list', '-plist'],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=30, creationflags=creation_flags
             )
             diskutil_data = None
             if result.returncode == 0:
@@ -1453,9 +1522,13 @@ class InventoryTask(BaseTask):
                         adapters.append(value)
             
             # Also get from ifconfig
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
                 ['ifconfig'],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=30, creationflags=creation_flags
             )
             ifconfig_data = result.stdout if result.returncode == 0 else None
             
@@ -1469,9 +1542,13 @@ class InventoryTask(BaseTask):
     def collect_macos_printer_info(self) -> Optional[Any]:
         """Collect macOS printer information."""
         try:
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
                 ['lpstat', '-p', '-d'],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=30, creationflags=creation_flags
             )
             if result.returncode != 0:
                 return None
@@ -1634,7 +1711,11 @@ class InventoryTask(BaseTask):
     def _linux_run_command(self, command: List[str], timeout: int = 30) -> Optional[str]:
         """Run a Linux command and return output."""
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            # Suppress console window on Windows
+            creation_flags = 0
+            if sys.platform.startswith('win') and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, creationflags=creation_flags)
             if result.returncode == 0:
                 return result.stdout.strip()
         except Exception:
@@ -2388,6 +2469,8 @@ class InventoryTask(BaseTask):
             }
             if os_data.get('build_number'):
                 glpi_content['OPERATINGSYSTEM']['KERNEL_VERSION'] = os_data['build_number']
+            # Note: OWNER is not a valid field in OPERATINGSYSTEM section per GLPI schema
+            # Registered owner information cannot be sent in this section
             
             # CPUS - Map from Windows CPU data
             cpu_data = windows_data.get('cpu', {})
@@ -2406,6 +2489,17 @@ class InventoryTask(BaseTask):
             memory_modules = memory_data.get('modules', [])
             if memory_modules:
                 glpi_content['MEMORIES'] = []
+                # Memory type mapping
+                memory_type_map = {
+                    0: 'Unknown', 1: 'Other', 2: 'DRAM', 3: 'Synchronous DRAM',
+                    4: 'Cache DRAM', 5: 'EDO', 6: 'EDRAM', 7: 'VRAM',
+                    8: 'SRAM', 9: 'RAM', 10: 'ROM', 11: 'Flash', 12: 'EEPROM',
+                    13: 'FEPROM', 14: 'EPROM', 15: 'CDRAM', 16: '3DRAM',
+                    17: 'SDRAM', 18: 'SGRAM', 19: 'RDRAM', 20: 'DDR',
+                    21: 'DDR2', 22: 'DDR2 FB-DIMM', 24: 'DDR3', 25: 'FBD2',
+                    26: 'DDR4', 27: 'LPDDR', 28: 'LPDDR2', 29: 'LPDDR3',
+                    30: 'LPDDR4'
+                }
                 for mem in memory_modules:
                     if isinstance(mem, dict):
                         mem_entry = {}
@@ -2422,6 +2516,12 @@ class InventoryTask(BaseTask):
                             mem_entry['SPEED'] = str(mem['Speed'])
                         if mem.get('BankLabel'): 
                             mem_entry['CAPTION'] = mem['BankLabel']
+                        # Add TYPE field
+                        memory_type = mem.get('MemoryType')
+                        if memory_type is not None:
+                            mem_type_str = memory_type_map.get(memory_type, 'Unknown')
+                            if mem_type_str and mem_type_str != 'Unknown':
+                                mem_entry['TYPE'] = mem_type_str
                         if mem_entry:
                             glpi_content['MEMORIES'].append(mem_entry)
             
@@ -2460,10 +2560,15 @@ class InventoryTask(BaseTask):
                 glpi_content['DRIVES'] = []
                 for vol in volumes:
                     if isinstance(vol, dict):
+                        # Ensure LABEL is always a string, not None
+                        label = vol.get('Label') or ''
+                        if label is None:
+                            label = ''
+                        
                         drive_entry = {
-                            'LETTER': vol.get('DriveLetter', ''),
-                            'LABEL': vol.get('Label', ''),
-                            'FILESYSTEM': vol.get('FileSystem', ''),
+                            'LETTER': vol.get('DriveLetter') or '',
+                            'LABEL': label,
+                            'FILESYSTEM': vol.get('FileSystem') or '',
                             'TOTAL': int(vol.get('Capacity', 0) / (1024*1024)) if vol.get('Capacity') else 0,
                             'FREE': int(vol.get('FreeSpace', 0) / (1024*1024)) if vol.get('FreeSpace') else 0,
                         }
@@ -2558,6 +2663,10 @@ class InventoryTask(BaseTask):
                             description = adapter.get('Name', 'Network Adapter')
                     if description:
                         net_entry['DESCRIPTION'] = str(description).strip()
+                    
+                    # Add MANUFACTURER from adapter
+                    if adapter.get('Manufacturer'):
+                        net_entry['MANUFACTURER'] = str(adapter['Manufacturer']).strip()
                     
                     # Detect adapter type (Bluetooth, Ethernet, WiFi, etc.)
                     adapter_name = str(adapter.get('Name', '')).upper()
@@ -3967,9 +4076,16 @@ class GLPIAgent:
             self.logger.info("Options 'no-task' and 'tasks' are both used. "
                            "Be careful that 'no-task' always excludes tasks.")
        
-        # Signal handlers
-        signal.signal(signal.SIGINT, lambda s, f: self._signal_handler())
-        signal.signal(signal.SIGTERM, lambda s, f: self._signal_handler())
+        # Signal handlers (only in main thread)
+        try:
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGINT, lambda s, f: self._signal_handler())
+                signal.signal(signal.SIGTERM, lambda s, f: self._signal_handler())
+        except (ValueError, AttributeError):
+            # Signal handlers can only be set in main thread
+            # Skip if running in a background thread
+            pass
        
         if options:
             for comment in COMMENTS:

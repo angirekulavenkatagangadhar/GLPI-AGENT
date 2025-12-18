@@ -24,28 +24,34 @@ if _parent_module_path not in sys.path:
 
 # Import from the Agent.py file in the parent directory
 try:
-    # Import the module as AgentModule to avoid naming conflict
-    import importlib.util
-    agent_file = _parent_dir / 'Agent.py'
-    if agent_file.exists():
-        spec = importlib.util.spec_from_file_location("GLPI.Agent", agent_file)
-        if spec and spec.loader:
-            agent_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(agent_module)
-            
-            # Re-export the main classes and constants
-            GLPIAgent = getattr(agent_module, 'GLPIAgent', None)
-            VERSION_STRING = getattr(agent_module, 'VERSION_STRING', None)
-            COMMENTS = getattr(agent_module, 'COMMENTS', None)
-            VERSION = getattr(agent_module, 'VERSION', None)
-            PROVIDER = getattr(agent_module, 'PROVIDER', None)
-except Exception:
-    # If import fails, set to None
-    GLPIAgent = None
-    VERSION_STRING = None
-    COMMENTS = None
-    VERSION = None
-    PROVIDER = None
+    # Try direct import first (works in normal Python and PyInstaller)
+    try:
+        from ..Agent import GLPIAgent, VERSION_STRING, COMMENTS, VERSION, PROVIDER
+    except (ImportError, ValueError):
+        # Fallback: use importlib for file-based import (development mode)
+        import importlib.util
+        agent_file = _parent_dir / 'Agent.py'
+        if agent_file.exists():
+            spec = importlib.util.spec_from_file_location("GLPI.Agent", agent_file)
+            if spec and spec.loader:
+                agent_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(agent_module)
+                
+                # Re-export the main classes and constants
+                GLPIAgent = getattr(agent_module, 'GLPIAgent', None)
+                VERSION_STRING = getattr(agent_module, 'VERSION_STRING', None)
+                COMMENTS = getattr(agent_module, 'COMMENTS', None)
+                VERSION = getattr(agent_module, 'VERSION', None)
+                PROVIDER = getattr(agent_module, 'PROVIDER', None)
+            else:
+                raise ImportError("Could not load Agent module spec")
+        else:
+            raise ImportError(f"Agent.py not found at {agent_file}")
+except Exception as e:
+    # If import fails, raise an error instead of silently setting to None
+    import sys
+    print(f"CRITICAL: Failed to import GLPIAgent from GLPI.Agent: {e}", file=sys.stderr)
+    raise ImportError(f"Could not import GLPIAgent: {e}") from e
 
 __all__ = ['GLPIAgent', 'VERSION_STRING', 'COMMENTS', 'VERSION', 'PROVIDER']
 

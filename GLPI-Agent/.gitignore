@@ -80,3 +80,25 @@ https:__*/
 
 # Reference/development folders
 perl-reference/
+
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+env/
+../env/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Installer & exe outputs
+*.exe
+*.dll
+
+# OS files
+.DS_Store
+Thumbs.db

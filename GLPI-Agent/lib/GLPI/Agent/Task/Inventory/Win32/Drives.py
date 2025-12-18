@@ -86,18 +86,28 @@ class Drives(InventoryModule):
             
             device_id = obj.get('DeviceID') or obj.get('Caption')
             
+            # Ensure LABEL is always a string, not None
+            label = obj.get('VolumeName') or ''
+            if label is None:
+                label = ''
+            
+            # Ensure all string fields are not None
+            serial = obj.get('VolumeSerialNumber') or ''
+            if serial is None:
+                serial = ''
+            
             drive = {
                 'CREATEDATE': obj.get('InstallDate'),
-                'DESCRIPTION': obj.get('Description'),
+                'DESCRIPTION': obj.get('Description') or '',
                 'FREE': free_space,
-                'FILESYSTEM': filesystem,
-                'LABEL': obj.get('VolumeName'),
-                'LETTER': device_id,
-                'SERIAL': obj.get('VolumeSerialNumber'),
+                'FILESYSTEM': filesystem or '',
+                'LABEL': label,
+                'LETTER': device_id or '',
+                'SERIAL': serial,
                 'SYSTEMDRIVE': device_id and device_id.lower() == system_drive,
                 'TOTAL': size,
                 'TYPE': self.DRIVE_TYPES[obj.get('DriveType', 0)] if obj.get('DriveType', 0) < len(self.DRIVE_TYPES) else 'Unknown',
-                'VOLUMN': obj.get('VolumeName'),
+                'VOLUMN': label,
             }
             
             seen[device_id] = drive
@@ -138,18 +148,36 @@ class Drives(InventoryModule):
             if drive_type is None:
                 drive_type = 0
             
+            # Ensure LABEL is always a string, not None
+            label = obj.get('Label') or ''
+            if label is None:
+                label = ''
+            
+            # Ensure all string fields are not None
+            filesystem = obj.get('FileSystem') or ''
+            if filesystem is None:
+                filesystem = ''
+            
+            letter_str = letter or ''
+            if letter_str is None:
+                letter_str = ''
+            
+            serial = self._encode_serial_number(obj.get('SerialNumber')) or ''
+            if serial is None:
+                serial = ''
+            
             drive = {
                 'CREATEDATE': obj.get('InstallDate'),
-                'DESCRIPTION': obj.get('Description'),
+                'DESCRIPTION': obj.get('Description') or '',
                 'FREE': free_space,
-                'FILESYSTEM': obj.get('FileSystem'),
-                'LABEL': obj.get('Label'),
-                'LETTER': letter,
-                'SERIAL': self._encode_serial_number(obj.get('SerialNumber')),
+                'FILESYSTEM': filesystem,
+                'LABEL': label,
+                'LETTER': letter_str,
+                'SERIAL': serial,
                 'SYSTEMDRIVE': systemdrive,
                 'TOTAL': capacity,
                 'TYPE': self.DRIVE_TYPES[drive_type] if drive_type < len(self.DRIVE_TYPES) else 'Unknown',
-                'VOLUMN': obj.get('Label'),
+                'VOLUMN': label,
             }
             
             device_id = obj.get('DeviceID') or drive_letter or obj.get('Caption')
